@@ -30,7 +30,7 @@ def main():
     print("\n=== Head of downloaded data ===")
     print(df.head())
 
-    perf = PerformanceMetrics(df)
+    perf = PerformanceMetrics(df, ticker)
 
     print("\n=== Annualized metrics ===")
     metrics = perf.annualized_metrics()
