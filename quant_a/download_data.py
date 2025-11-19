@@ -1,29 +1,26 @@
-import yfinance as yf
+﻿import yfinance as yf
 import sys
 from datetime import datetime
 import pandas as pd
+import os
 
 
 def download_ticker(ticker: str, start_date: str):
     """
     Download daily adjusted (auto-adjusted) close prices for a given ticker since start_date.
-    Fully compatible with yfinance ≥ 0.2.66 (MultiIndex with ['Price','Ticker']).
+    Saves the file in quant_a/data/.
     """
     end_date = datetime.today().strftime("%Y-%m-%d")
-
-    # Force auto_adjust=True to get adjusted prices
     data = yf.download(ticker, start=start_date, end=end_date, interval="1d", auto_adjust=True)
 
-    # --- Handle MultiIndex (like ('Close','AAPL')) ---
+    # Handle MultiIndex (yfinance ≥ 0.2.66)
     if isinstance(data.columns, pd.MultiIndex):
-        # Select ('Close', ticker)
         if ("Close", ticker) in data.columns:
             data = data[("Close", ticker)].to_frame()
             data.columns = ["Adj Close"]
         else:
             raise ValueError(f"No ('Close','{ticker}') column found in data.")
     else:
-        # Old flat format
         if "Adj Close" in data.columns:
             data = data[["Adj Close"]]
         elif "Close" in data.columns:
@@ -31,8 +28,11 @@ def download_ticker(ticker: str, start_date: str):
         else:
             raise ValueError(f"No 'Close' or 'Adj Close' column found for {ticker}")
 
-    # --- Save to CSV ---
-    filename = f"{ticker.upper()}_adj_close.csv"
+    # === Save to quant_a/data/ ===
+    data_dir = os.path.join(os.path.dirname(__file__), "data")
+    os.makedirs(data_dir, exist_ok=True)
+
+    filename = os.path.join(data_dir, f"{ticker.upper()}_adj_close.csv")
     data.to_csv(filename)
     print(f"✅ Data for {ticker.upper()} saved to {filename}")
     return data
