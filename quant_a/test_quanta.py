@@ -1,5 +1,4 @@
-﻿(paste le code ci-dessus ici)
-import sys
+﻿import sys
 import os
 import matplotlib.pyplot as plt
 
