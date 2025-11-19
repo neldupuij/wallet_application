@@ -8,12 +8,13 @@ import os
 def download_ticker(ticker: str, start_date: str):
     """
     Download daily adjusted (auto-adjusted) close prices for a given ticker since start_date.
-    Saves the file in quant_a/data/.
+    Save in quant_a/data/<TICKER>_adj_close.csv
     """
     end_date = datetime.today().strftime("%Y-%m-%d")
+
     data = yf.download(ticker, start=start_date, end=end_date, interval="1d", auto_adjust=True)
 
-    # Handle MultiIndex (yfinance ≥ 0.2.66)
+    # Handle MultiIndex (e.g., ('Close','AAPL'))
     if isinstance(data.columns, pd.MultiIndex):
         if ("Close", ticker) in data.columns:
             data = data[("Close", ticker)].to_frame()
@@ -28,11 +29,12 @@ def download_ticker(ticker: str, start_date: str):
         else:
             raise ValueError(f"No 'Close' or 'Adj Close' column found for {ticker}")
 
-    # === Save to quant_a/data/ ===
-    data_dir = os.path.join(os.path.dirname(__file__), "data")
-    os.makedirs(data_dir, exist_ok=True)
+    # Ensure directory exists
+    save_dir = os.path.join("quant_a", "data")
+    os.makedirs(save_dir, exist_ok=True)
 
-    filename = os.path.join(data_dir, f"{ticker.upper()}_adj_close.csv")
+    # Save file
+    filename = os.path.join(save_dir, f"{ticker.upper()}_adj_close.csv")
     data.to_csv(filename)
     print(f"✅ Data for {ticker.upper()} saved to {filename}")
     return data
