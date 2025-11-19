@@ -4,7 +4,11 @@ import numpy as np
 import pandas as pd
 
 from quant_a.download_data import download_ticker
-from quant_a.backtest import backtest_momentum, backtest_arima
+from quant_a.backtest import (
+    backtest_buy_and_hold,
+    backtest_momentum,
+    backtest_arima,
+)
 
 
 def compute_metrics(equity: pd.Series) -> dict:
@@ -23,7 +27,7 @@ def compute_metrics(equity: pd.Series) -> dict:
     returns = equity.pct_change().dropna()
     n = len(returns)
 
-    # on suppose 252 jours de bourse par an
+    # On suppose 252 jours de bourse par an
     annual_return = (equity.iloc[-1] / equity.iloc[0]) ** (252.0 / n) - 1.0
     annual_vol = returns.std() * np.sqrt(252.0)
     sharpe = annual_return / annual_vol if annual_vol > 0 else np.nan
@@ -57,16 +61,37 @@ def main():
     print(f"\n=== Grid search for {ticker} starting {start_date} ===")
 
     # -----------------------------
-    # 1) Download des prix
+    # 1) Données de prix
     # -----------------------------
     df = download_ticker(ticker, start_date)
 
     results = []
 
     # -----------------------------
-    # 2) Grid search Momentum
+    # 2) Buy & Hold de référence
     # -----------------------------
-    momentum_lookbacks = [3, 5, 10, 20]
+    print("\n=== Reference: Buy & Hold ===")
+    try:
+        bh_df = backtest_buy_and_hold(df, ticker, save_csv=False)
+        bh_metrics = compute_metrics(bh_df["Equity"])
+        bh_metrics.update({
+            "strategy": "buy_hold",
+            "lookback": np.nan,
+            "p": np.nan,
+            "d": np.nan,
+            "q": np.nan,
+        })
+        results.append(bh_metrics)
+        print(f"Buy & Hold: Sharpe={bh_metrics['sharpe']:.3f}, "
+              f"AnnRet={bh_metrics['annual_return']:.3f}, "
+              f"MaxDD={bh_metrics['max_drawdown']:.3f}")
+    except Exception as e:
+        print(f"⚠️ Buy & Hold failed: {e}")
+
+    # -----------------------------
+    # 3) Grid search Momentum
+    # -----------------------------
+    momentum_lookbacks = [3, 5, 10, 20, 40, 60, 90]
 
     print("\n=== Testing Momentum lookbacks ===")
     for lb in momentum_lookbacks:
@@ -81,46 +106,49 @@ def main():
                 "q": np.nan,
             })
             results.append(metrics)
-            print(f"Momentum L={lb}: Sharpe={metrics['sharpe']:.3f}, "
-                  f"AnnRet={metrics['annual_return']:.3f}, MaxDD={metrics['max_drawdown']:.3f}")
+            print(f"Momentum L={lb:>3}: Sharpe={metrics['sharpe']:.3f}, "
+                  f"AnnRet={metrics['annual_return']:.3f}, "
+                  f"MaxDD={metrics['max_drawdown']:.3f}")
         except Exception as e:
             print(f"⚠️ Momentum L={lb} failed: {e}")
 
     # -----------------------------
-    # 3) Grid search ARIMA
+    # 4) Grid search ARIMA
     # -----------------------------
-    p_list = [1, 2, 5]
-    d_list = [0, 1]
-    q_list = [0, 1]
+    # Grille un peu plus large mais raisonnable
+    arima_orders = []
+    for p in [0, 1, 2, 3, 5]:
+        for d in [0, 1]:
+            for q in [0, 1, 2]:
+                arima_orders.append((p, d, q))
 
     print("\n=== Testing ARIMA (p,d,q) ===")
-    for p in p_list:
-        for d in d_list:
-            for q in q_list:
-                try:
-                    order = (p, d, q)
-                    strat_df = backtest_arima(df, ticker, order=order, save_csv=False)
-                    metrics = compute_metrics(strat_df["Equity"])
-                    metrics.update({
-                        "strategy": "arima",
-                        "lookback": np.nan,
-                        "p": p,
-                        "d": d,
-                        "q": q,
-                    })
-                    results.append(metrics)
-                    print(f"ARIMA{order}: Sharpe={metrics['sharpe']:.3f}, "
-                          f"AnnRet={metrics['annual_return']:.3f}, MaxDD={metrics['max_drawdown']:.3f}")
-                except Exception as e:
-                    print(f"⚠️ ARIMA{(p,d,q)} failed: {e}")
+    for order in arima_orders:
+        p, d, q = order
+        try:
+            strat_df = backtest_arima(df, ticker, order=order, save_csv=False)
+            metrics = compute_metrics(strat_df["Equity"])
+            metrics.update({
+                "strategy": "arima",
+                "lookback": np.nan,
+                "p": p,
+                "d": d,
+                "q": q,
+            })
+            results.append(metrics)
+            print(f"ARIMA{order}: Sharpe={metrics['sharpe']:.3f}, "
+                  f"AnnRet={metrics['annual_return']:.3f}, "
+                  f"MaxDD={metrics['max_drawdown']:.3f}")
+        except Exception as e:
+            print(f"⚠️ ARIMA{order} failed: {e}")
 
     # -----------------------------
-    # 4) Sauvegarde des résultats
+    # 5) Sauvegarde des résultats
     # -----------------------------
     if results:
         res_df = pd.DataFrame(results)
 
-        # trie par Sharpe décroissant
+        # Tri par Sharpe décroissant
         res_df_sorted = res_df.sort_values(by="sharpe", ascending=False)
 
         save_dir = os.path.join("quant_a", "data")
@@ -128,8 +156,8 @@ def main():
         out_path = os.path.join(save_dir, f"GRIDSEARCH_{ticker.upper()}.csv")
         res_df_sorted.to_csv(out_path, index=False)
         print(f"\n✅ Grid search results saved to {out_path}")
-        print("\n=== Top 5 configurations ===")
-        print(res_df_sorted.head())
+        print("\n=== Top 10 configurations ===")
+        print(res_df_sorted.head(10))
     else:
         print("No results computed (all configurations failed?).")
 
