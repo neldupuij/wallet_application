@@ -1,5 +1,4 @@
-﻿(paste le code ci-dessus ici)
-import sys
+﻿import sys
 import os
 
 from quant_a.download_data import download_ticker
