@@ -23,54 +23,45 @@ def main():
     if len(sys.argv) >= 4:
         steps_ahead = int(sys.argv[3])
     else:
-        steps_ahead = 30  # default forecast horizon
+        steps_ahead = 30
 
     print(f"\n=== Downloading data for {ticker} since {start_date} ===")
     df = download_ticker(ticker, start_date)
 
-    print("\n=== Head of downloaded data ===")
-    print(df.head())
-
     perf = PerformanceMetrics(df, ticker)
+    metrics = perf.annualized_metrics()
+    cum_df = perf.cumulative_return()
 
     print("\n=== Annualized metrics ===")
-    metrics = perf.annualized_metrics()
     for k, v in metrics.items():
         if isinstance(v, (float, int)):
             print(f"{k}: {v:.4f}")
         else:
             print(f"{k}: {v}")
 
-    print("\n=== Cumulative return sample ===")
-    cum_df = perf.cumulative_return()
-    print(cum_df.head())
-
     # === Backtests ===
-    print("\n=== Buy & Hold backtest (head) ===")
     bh_df = backtest_buy_and_hold(df, ticker)
-    print(bh_df.head())
-
-    print("\n=== Momentum backtest (head, lookback=5) ===")
     mom_df = backtest_momentum(df, ticker, lookback=5)
-    print(mom_df.head())
 
-    # === Plot: Price + Strategies ===
-    print("\n=== Plotting combined strategies ===")
+    # === Normaliser le prix pour comparaison ===
+    df["Normalized Price"] = df["Adj Close"] / df["Adj Close"].iloc[0]
+
+    # === Graphique comparatif ===
+    print("\n=== Plotting normalized price vs strategies ===")
     plt.figure(figsize=(10, 6))
-    plt.plot(df["Adj Close"], label="Price (Adj Close)", color="gray", alpha=0.7)
+    plt.plot(df["Normalized Price"], label="Normalized Price", color="gray", alpha=0.7)
     plt.plot(bh_df["Equity"], label="Buy & Hold", color="blue")
     plt.plot(mom_df["Equity"], label="Momentum (5d)", color="orange")
-    plt.title(f"{ticker.upper()} — Price vs Strategies")
+    plt.title(f"{ticker.upper()} — Normalized Price vs Strategies")
     plt.xlabel("Date")
-    plt.ylabel("Value / Price")
+    plt.ylabel("Normalized Value (Start = 1)")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
     plt.show()
 
-    # === ARIMA PREDICTION PART ===
+    # === ARIMA ===
     csv_path = os.path.join("quant_a", "data", f"{ticker.upper()}_adj_close.csv")
-    print(f"\n=== ARIMA forecast on {csv_path} for {steps_ahead} business days ===")
     forecast_df = predict_arima(csv_path, steps_ahead)
     print("\n=== ARIMA forecast (head) ===")
     print(forecast_df.head())
