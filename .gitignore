@@ -1,0 +1,5 @@
+﻿# Ignore data files
+*.csv
+*.log
+__pycache__/
+.venv/
