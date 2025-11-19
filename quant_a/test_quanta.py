@@ -4,12 +4,12 @@ import os
 from quant_a.download_data import download_ticker
 from quant_a.performance import PerformanceMetrics
 from quant_a.predict import predict_arima
+from quant_a.backtest import backtest_buy_and_hold, backtest_momentum
 
 
 def main():
     # Usage :
     #   python -m quant_a.test_quanta AAPL 2020-01-01 30
-    #   (3rd arg = number of forecast days, optional)
 
     if len(sys.argv) >= 3:
         ticker = sys.argv[1]
@@ -43,6 +43,15 @@ def main():
     print("\n=== Cumulative return sample ===")
     cum_df = perf.cumulative_return()
     print(cum_df.head())
+
+    # === Backtests ===
+    print("\n=== Buy & Hold backtest (head) ===")
+    bh_df = backtest_buy_and_hold(df, ticker)
+    print(bh_df.head())
+
+    print("\n=== Momentum backtest (head, lookback=5) ===")
+    mom_df = backtest_momentum(df, ticker, lookback=5)
+    print(mom_df.head())
 
     # === ARIMA PREDICTION PART ===
     csv_path = os.path.join("quant_a", "data", f"{ticker.upper()}_adj_close.csv")
