@@ -1,286 +1,450 @@
 ﻿import os
 import sys
-import warnings
-
-warnings.filterwarnings("ignore")
-
-from datetime import datetime, timedelta
+import subprocess
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import streamlit as st
-import yfinance as yf
 import plotly.graph_objects as go
-
-# ---- Rendre quant_a importable même si ce fichier est dans quant_a/ ----
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+import yfinance as yf
 
 from quant_a.download_data import download_ticker
-from quant_a.backtest import backtest_buy_and_hold, backtest_momentum, backtest_arima
-
-
-st.set_page_config(
-    page_title="Quant A – Single Asset Dashboard",
-    layout="wide",
+from quant_a.backtest import (
+    backtest_buy_and_hold,
+    backtest_momentum,
+    backtest_arima,
 )
 
 
-@st.cache_data
-def load_prices(ticker: str, start_date: str) -> pd.DataFrame:
-    """Télécharge les prix ajustés depuis start_date."""
-    return download_ticker(ticker, start_date)
-
-
-def compute_metrics_from_equity(equity: pd.Series) -> dict:
-    """Calcule rendement annualisé, vol, Sharpe, max drawdown à partir d'une courbe d'equity."""
+def compute_strategy_metrics(equity: pd.Series) -> dict:
+    """Compute basic performance metrics from an equity curve (start = 1)."""
     equity = equity.dropna()
-    if len(equity) < 2:
-        return dict(annual_return=np.nan, annual_vol=np.nan,
-                    sharpe=np.nan, max_drawdown=np.nan)
+    if equity.empty:
+        return {
+            "final_equity": np.nan,
+            "annual_return": np.nan,
+            "annual_vol": np.nan,
+            "sharpe": np.nan,
+            "max_drawdown_pct": np.nan,
+        }
 
-    returns = equity.pct_change().dropna()
-    n = len(returns)
-    annual_return = (equity.iloc[-1] / equity.iloc[0]) ** (252.0 / n) - 1.0
-    annual_vol = returns.std() * np.sqrt(252.0)
-    sharpe = annual_return / annual_vol if annual_vol > 0 else np.nan
+    rets = equity.pct_change().dropna()
+    if rets.empty:
+        return {
+            "final_equity": float(equity.iloc[-1]),
+            "annual_return": 0.0,
+            "annual_vol": 0.0,
+            "sharpe": 0.0,
+            "max_drawdown_pct": 0.0,
+        }
+
+    mean_ret = rets.mean()
+    vol = rets.std()
+
+    ann_ret = (1 + mean_ret) ** 252 - 1
+    ann_vol = vol * np.sqrt(252)
+    sharpe = ann_ret / ann_vol if ann_vol > 0 else 0.0
 
     running_max = equity.cummax()
-    drawdown = equity / running_max - 1.0
-    max_dd = drawdown.min()
+    dd = equity / running_max - 1.0
+    max_dd = dd.min()
 
-    return dict(
-        annual_return=annual_return,
-        annual_vol=annual_vol,
-        sharpe=sharpe,
-        max_drawdown=max_dd,
-    )
+    return {
+        "final_equity": float(equity.iloc[-1]),
+        "annual_return": float(ann_ret),
+        "annual_vol": float(ann_vol),
+        "sharpe": float(sharpe),
+        "max_drawdown_pct": float(max_dd * 100.0),
+    }
 
 
-def filter_range(df: pd.DataFrame, range_label: str) -> pd.DataFrame:
-    """Filtre df sur 5D / 1M / 3M / 6M / 1Y / Max."""
-    if df.empty or range_label == "Max":
+def restrict_range(df: pd.DataFrame, range_key: str) -> pd.DataFrame:
+    """Coupe la série selon Max / 1Y / 6M / 3M / 1M / 5D."""
+    if df.empty:
         return df
     end = df.index.max()
-    if range_label == "5D":
-        delta = timedelta(days=5)
-    elif range_label == "1M":
-        delta = timedelta(days=30)
-    elif range_label == "3M":
-        delta = timedelta(days=90)
-    elif range_label == "6M":
-        delta = timedelta(days=182)
-    elif range_label == "1Y":
-        delta = timedelta(days=365)
-    else:
+    if range_key == "Max":
         return df
-    start = end - delta
-    return df[df.index >= start]
+    mapping_days = {
+        "1Y": 252,
+        "6M": 126,
+        "3M": 63,
+        "1M": 21,
+        "5D": 5,
+    }
+    days = mapping_days.get(range_key, None)
+    if days is None:
+        return df
+    start = end - pd.Timedelta(days=days * 1.5)
+    return df.loc[df.index >= start]
+
+
+def get_ohlc(ticker: str, start_date: str) -> pd.DataFrame:
+    """Télécharge OHLC pour les chandeliers."""
+    data = yf.download(ticker, start=start_date, interval="1d", auto_adjust=False)
+    if data.empty:
+        return data
+    return data[["Open", "High", "Low", "Close"]]
+
+
+def get_data_dir() -> str:
+    """Retourne le chemin du dossier quant_a/data/."""
+    here = os.path.dirname(__file__)
+    data_dir = os.path.join(here, "data")
+    os.makedirs(data_dir, exist_ok=True)
+    return data_dir
 
 
 def main():
-    st.title("Quant A – Single Asset Analysis (Streamlit)")
+    st.set_page_config(
+        page_title="Quant A – Single Asset Backtester",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
 
-    # ---------------- Sidebar ----------------
+    st.title("Quant A – Single Asset Analysis")
+
+    if "momentum_L" not in st.session_state:
+        st.session_state["momentum_L"] = 20
+    if "arima_p" not in st.session_state:
+        st.session_state["arima_p"] = 2
+    if "arima_d" not in st.session_state:
+        st.session_state["arima_d"] = 0
+    if "arima_q" not in st.session_state:
+        st.session_state["arima_q"] = 1
+    if "best_grid_df" not in st.session_state:
+        st.session_state["best_grid_df"] = None
+    if "best_momentum_L" not in st.session_state:
+        st.session_state["best_momentum_L"] = None
+    if "best_arima" not in st.session_state:
+        st.session_state["best_arima"] = None
+
     with st.sidebar:
         st.header("Parameters")
 
-        ticker = st.text_input("Ticker", value="AAPL")
-        years = st.slider("Years of history", 1, 15, 10)
+        ticker = st.text_input("Ticker", value="AAPL").upper()
 
-        momentum_L = st.slider("Momentum lookback (days)", 3, 120, 20, step=1)
+        years_history = st.slider("Years of history", 1, 20, 10)
 
-        st.markdown("**ARIMA parameters (p, d, q)**")
-        arima_p = st.number_input("p", min_value=0, max_value=10, value=2, step=1)
-        arima_d = st.number_input("d", min_value=0, max_value=2, value=0, step=1)
-        arima_q = st.number_input("q", min_value=0, max_value=5, value=1, step=1)
+        st.markdown("Momentum lookback (days)")
+        L = st.slider(
+            "Momentum lookback (days)",
+            min_value=3,
+            max_value=120,
+            value=st.session_state["momentum_L"],
+            step=1,
+            key="momentum_L",
+            label_visibility="collapsed",
+        )
 
-        range_label = st.radio(
-            "Display range",
-            ["Max", "1Y", "6M", "3M", "1M", "5D"],
+        st.markdown("ARIMA parameters (p, d, q)")
+        p = st.number_input(
+            "p", min_value=0, max_value=5, value=st.session_state["arima_p"], step=1, key="arima_p"
+        )
+        d = st.number_input(
+            "d", min_value=0, max_value=2, value=st.session_state["arima_d"], step=1, key="arima_d"
+        )
+        q = st.number_input(
+            "q", min_value=0, max_value=5, value=st.session_state["arima_q"], step=1, key="arima_q"
+        )
+
+        st.markdown("Display range")
+        display_range = st.radio(
+            "",
+            options=["Max", "1Y", "6M", "3M", "1M", "5D"],
             index=0,
             horizontal=True,
+            key="display_range",
         )
 
         chart_type = st.radio(
             "Chart type",
-            ["Line", "Candlestick"],
+            options=["Line", "Candlestick"],
             index=0,
-            horizontal=True,
         )
 
-        run_btn = st.button("Run backtests")
+        run_backtests = st.button("Run backtests", type="primary")
 
-    if not run_btn:
-        st.info("Choisis les paramètres dans la barre de gauche puis clique sur **Run backtests**.")
+        st.markdown("---")
+        optimize_clicked = st.button("Optimize parameters (grid search)")
+
+    if not ticker:
+        st.warning("Please enter a ticker.")
         return
 
-    # ---------------- Data loading ----------------
-    start_date = (datetime.today() - timedelta(days=years * 365)).date().isoformat()
-    try:
-        df = load_prices(ticker, start_date)
-    except Exception as e:
-        st.error(f"Erreur lors du téléchargement des données : {e}")
+    start_date = (date.today() - timedelta(days=years_history * 365)).isoformat()
+
+    with st.spinner(f"Downloading data for {ticker}…"):
+        try:
+            df_price = download_ticker(ticker, start_date)
+        except Exception as e:
+            st.error(f"Error while downloading data for {ticker}: {e}")
+            return
+
+    if df_price.empty:
+        st.error("No data downloaded for this ticker / period.")
         return
 
-    if df.empty:
-        st.warning("Pas de données renvoyées pour ce ticker / cette période.")
-        return
+    ohlc = get_ohlc(ticker, start_date)
 
-    st.subheader(f"Price data for {ticker} (last rows)")
-    st.dataframe(df.tail())
+    if run_backtests or "bh_df" not in st.session_state:
+        with st.spinner("Running backtests…"):
+            bh_df = backtest_buy_and_hold(df_price, ticker)
+            mom_df = backtest_momentum(df_price, ticker, lookback=int(L))
+            arima_df = backtest_arima(df_price, ticker, order=(int(p), int(d), int(q)))
 
-    # ---------------- Strategies ----------------
-    # Buy & Hold
-    try:
-        bh_df = backtest_buy_and_hold(df, ticker, save_csv=False)
-    except TypeError:
-        bh_df = backtest_buy_and_hold(df, ticker)
+        st.session_state["bh_df"] = bh_df
+        st.session_state["mom_df"] = mom_df
+        st.session_state["arima_df"] = arima_df
+    else:
+        bh_df = st.session_state["bh_df"]
+        mom_df = st.session_state["mom_df"]
+        arima_df = st.session_state["arima_df"]
 
-    # Momentum
-    try:
-        mom_df = backtest_momentum(df, ticker, lookback=momentum_L, save_csv=False)
-    except TypeError:
-        mom_df = backtest_momentum(df, ticker, lookback=momentum_L)
-
-    # ARIMA
-    arima_order = (int(arima_p), int(arima_d), int(arima_q))
-    try:
-        arima_df = backtest_arima(df, ticker, order=arima_order, save_csv=False)
-    except TypeError:
-        arima_df = backtest_arima(df, ticker, order=arima_order)
-    except Exception as e:
-        st.warning(f"ARIMA {arima_order} a échoué : {e}")
-        arima_df = None
-
-    # ---------------- Metrics table ----------------
     metrics_rows = []
 
-    bh_metrics = compute_metrics_from_equity(bh_df["Equity"])
-    bh_metrics["Strategy"] = "Buy & Hold"
-    metrics_rows.append(bh_metrics)
+    bh_equity = bh_df["Equity"]
+    m_bh = compute_strategy_metrics(bh_equity)
+    m_bh["strategy"] = "Buy & Hold"
+    metrics_rows.append(m_bh)
 
-    mom_metrics = compute_metrics_from_equity(mom_df["Equity"])
-    mom_metrics["Strategy"] = f"Momentum (L={momentum_L})"
-    metrics_rows.append(mom_metrics)
+    mom_equity = mom_df["Equity"]
+    m_mom = compute_strategy_metrics(mom_equity)
+    m_mom["strategy"] = f"Momentum (L={int(L)})"
+    metrics_rows.append(m_mom)
 
-    if arima_df is not None:
-        arima_metrics = compute_metrics_from_equity(arima_df["Equity"])
-        arima_metrics["Strategy"] = f"ARIMA{arima_order}"
-        metrics_rows.append(arima_metrics)
+    arima_equity = arima_df["Equity"]
+    m_arima = compute_strategy_metrics(arima_equity)
+    m_arima["strategy"] = f"ARIMA({int(p)}, {int(d)}, {int(q)})"
+    metrics_rows.append(m_arima)
 
-    metrics_df = pd.DataFrame(metrics_rows).set_index("Strategy")
-    st.subheader("Performance metrics (annualized)")
-    st.dataframe(metrics_df.style.format("{:.4f}"))
+    metrics_df = pd.DataFrame(metrics_rows)[
+        [
+            "strategy",
+            "final_equity",
+            "annual_return",
+            "annual_vol",
+            "sharpe",
+            "max_drawdown_pct",
+        ]
+    ]
 
-    # ---------------- Plot ----------------
-    price_norm = df["Adj Close"] / df["Adj Close"].iloc[0]
-    plot_df = pd.DataFrame(index=df.index)
-    plot_df["Price"] = price_norm
+    st.subheader("Strategy metrics")
 
-    plot_df["Buy & Hold"] = bh_df["Equity"].reindex(plot_df.index)
-    plot_df["Momentum"] = mom_df["Equity"].reindex(plot_df.index)
-    if arima_df is not None:
-        plot_df["ARIMA"] = arima_df["Equity"].reindex(plot_df.index)
+    st.dataframe(
+        metrics_df.style.format(
+            {
+                "final_equity": "{:.2f}",
+                "annual_return": "{:.2%}",
+                "annual_vol": "{:.2%}",
+                "sharpe": "{:.3f}",
+                "max_drawdown_pct": "{:.1f}%",
+            },
+            na_rep="–",
+        ),
+        use_container_width=True,
+    )
 
-    plot_df = filter_range(plot_df, range_label)
+    best_mom_str = ""
+    best_arima_str = ""
 
-    st.subheader(f"{ticker} — Price vs Strategies ({range_label})")
+    if optimize_clicked:
+        with st.spinner("Running grid search (this can take some time)…"):
+            try:
+                cmd = [sys.executable, "-m", "quant_a.grid_search", ticker, start_date]
+                subprocess.run(cmd, check=True)
 
-    if chart_type == "Line":
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(plot_df.index, plot_df["Price"], label="Normalized Price (Adj Close)", color="0.5", alpha=0.7)
-        ax.plot(plot_df.index, plot_df["Buy & Hold"], label="Buy & Hold", linewidth=1.5)
-        ax.plot(plot_df.index, plot_df["Momentum"], label=f"Momentum (L={momentum_L})", linewidth=1.5)
-        if "ARIMA" in plot_df.columns:
-            ax.plot(plot_df.index, plot_df["ARIMA"], label=f"ARIMA{arima_order}", linewidth=1.5)
+                data_dir = get_data_dir()
+                grid_path = os.path.join(data_dir, f"GRIDSEARCH_{ticker}.csv")
+                if not os.path.exists(grid_path):
+                    st.error(f"Grid search CSV not found at {grid_path}")
+                else:
+                    grid_df = pd.read_csv(grid_path)
+                    st.session_state["best_grid_df"] = grid_df
 
-        ax.set_xlabel("Date")
-        ax.set_ylabel("Normalized value (start = 1)")
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-        fig.tight_layout()
+                    mom_mask = grid_df["strategy"] == "momentum"
+                    if mom_mask.any():
+                        best_mom = grid_df.loc[mom_mask].sort_values(
+                            "sharpe", ascending=False
+                        ).iloc[0]
+                        st.session_state["best_momentum_L"] = int(best_mom["lookback"])
+                        best_mom_str = (
+                            f"Best Momentum: L={int(best_mom['lookback'])} "
+                            f"(Sharpe={best_mom['sharpe']:.3f})"
+                        )
 
-        st.pyplot(fig)
+                    ar_mask = grid_df["strategy"] == "arima"
+                    if ar_mask.any():
+                        best_ar = grid_df.loc[ar_mask].sort_values(
+                            "sharpe", ascending=False
+                        ).iloc[0]
+                        st.session_state["best_arima"] = (
+                            int(best_ar["p"]),
+                            int(best_ar["d"]),
+                            int(best_ar["q"]),
+                        )
+                        best_arima_str = (
+                            f"Best ARIMA: ({int(best_ar['p'])}, "
+                            f"{int(best_ar['d'])}, {int(best_ar['q'])}) "
+                            f"(Sharpe={best_ar['sharpe']:.3f})"
+                        )
+            except subprocess.CalledProcessError as e:
+                st.error(f"Error while running grid_search: {e}")
 
-    else:
-        # Candlesticks avec Plotly + stratégies superposées
-        raw = yf.download(ticker, start=start_date, interval="1d", auto_adjust=False, progress=False)
-        if raw.empty:
-            st.warning("Impossible de récupérer les données OHLC pour afficher les bougies.")
-            return
+    if st.session_state.get("best_grid_df") is not None:
+        st.subheader("Grid search results (top by Sharpe)")
+        grid_df = st.session_state["best_grid_df"].copy()
+        grid_df_sorted = grid_df.sort_values("sharpe", ascending=False).head(15)
+        st.dataframe(grid_df_sorted, use_container_width=True)
 
-        raw = raw[["Open", "High", "Low", "Close"]].dropna()
-        raw = filter_range(raw, range_label)
+        if st.session_state.get("best_momentum_L") is not None:
+            st.markdown(
+                f"**Best Momentum:** L = {st.session_state['best_momentum_L']}"
+            )
+        if st.session_state.get("best_arima") is not None:
+            bp, bd, bq = st.session_state["best_arima"]
+            st.markdown(f"**Best ARIMA:** ({bp}, {bd}, {bq})")
 
-        if raw.empty:
-            st.warning("Pas de données OHLC après filtrage pour cette fenêtre de temps.")
-            return
+        if st.button("Apply best parameters to controls"):
+            if st.session_state.get("best_momentum_L") is not None:
+                st.session_state["momentum_L"] = int(
+                    st.session_state["best_momentum_L"]
+                )
+            if st.session_state.get("best_arima") is not None:
+                bp, bd, bq = st.session_state["best_arima"]
+                st.session_state["arima_p"] = int(bp)
+                st.session_state["arima_d"] = int(bd)
+                st.session_state["arima_q"] = int(bq)
+            st.experimental_rerun()
 
-        fig = go.Figure()
+    st.subheader(f"{ticker} — Price vs Strategies")
+
+    price = df_price["Adj Close"]
+    price_norm = price / price.iloc[0]
+
+    bh_plot = restrict_range(bh_df.copy(), display_range)
+    mom_plot = restrict_range(mom_df.copy(), display_range)
+    arima_plot = restrict_range(arima_df.copy(), display_range)
+    price_plot = restrict_range(price_norm.to_frame("Price_norm"), display_range)
+
+    fig = go.Figure()
+
+    if chart_type == "Candlestick" and not ohlc.empty:
+        ohlc_plot = restrict_range(ohlc.copy(), display_range)
 
         fig.add_trace(
             go.Candlestick(
-                x=raw.index,
-                open=raw["Open"],
-                high=raw["High"],
-                low=raw["Low"],
-                close=raw["Close"],
+                x=ohlc_plot.index,
+                open=ohlc_plot["Open"],
+                high=ohlc_plot["High"],
+                low=ohlc_plot["Low"],
+                close=ohlc_plot["Close"],
                 name="Price (candles)",
+                opacity=0.8,
             )
         )
 
-        # Normaliser les equity pour qu'elles commencent au même niveau que le prix initial
-        base_price = float(raw["Close"].iloc[0])
-
-        def equity_on_candles(eq: pd.Series) -> pd.Series:
-            eq = eq.dropna()
-            if eq.empty:
-                return pd.Series(index=raw.index, dtype=float)
-            eq_norm = eq / eq.iloc[0] * base_price
-            return eq_norm.reindex(raw.index).ffill()
-
-        bh_equity = equity_on_candles(bh_df["Equity"])
-        mom_equity = equity_on_candles(mom_df["Equity"])
-        arima_equity = equity_on_candles(arima_df["Equity"]) if arima_df is not None else None
-
+        base_price = ohlc_plot["Close"].iloc[0]
         fig.add_trace(
             go.Scatter(
-                x=raw.index,
-                y=bh_equity,
-                mode="lines",
+                x=bh_plot.index,
+                y=bh_plot["Equity"] * base_price,
                 name="Buy & Hold",
+                mode="lines",
             )
         )
         fig.add_trace(
             go.Scatter(
-                x=raw.index,
-                y=mom_equity,
+                x=mom_plot.index,
+                y=mom_plot["Equity"] * base_price,
+                name=f"Momentum (L={int(L)})",
                 mode="lines",
-                name=f"Momentum (L={momentum_L})",
             )
         )
-        if arima_equity is not None:
-            fig.add_trace(
-                go.Scatter(
-                    x=raw.index,
-                    y=arima_equity,
-                    mode="lines",
-                    name=f"ARIMA{arima_order}",
-                )
+        fig.add_trace(
+            go.Scatter(
+                x=arima_plot.index,
+                y=arima_plot["Equity"] * base_price,
+                name=f"ARIMA({int(p)}, {int(d)}, {int(q)})",
+                mode="lines",
             )
-
-        fig.update_layout(
-            xaxis_title="Date",
-            yaxis_title="Price / Equity (aligned at start)",
-            xaxis_rangeslider_visible=False,
-            template="plotly_white",
-            height=600,
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        fig.update_yaxes(title="Price / Equity")
+    else:
+        fig.add_trace(
+            go.Scatter(
+                x=price_plot.index,
+                y=price_plot["Price_norm"],
+                name="Normalized Price (Adj Close)",
+                mode="lines",
+                line=dict(color="lightgray"),
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=bh_plot.index,
+                y=bh_plot["Equity"],
+                name="Buy & Hold",
+                mode="lines",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=mom_plot.index,
+                y=mom_plot["Equity"],
+                name=f"Momentum (L={int(L)})",
+                mode="lines",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=arima_plot.index,
+                y=arima_plot["Equity"],
+                name=f"ARIMA({int(p)}, {int(d)}, {int(q)})",
+                mode="lines",
+            )
+        )
+
+        fig.update_yaxes(title="Normalized value (start = 1)")
+
+    fig.update_layout(
+        xaxis_title="Date",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        hovermode="x unified",
+        height=650,
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("Export results")
+
+    equity_df = pd.DataFrame(
+        {
+            "BH_Equity": bh_equity,
+            "Momentum_Equity": mom_equity,
+            "ARIMA_Equity": arima_equity,
+        }
+    )
+    equity_csv = equity_df.to_csv(index=True).encode("utf-8")
+    metrics_csv = metrics_df.to_csv(index=False).encode("utf-8")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            "Download equity curves (CSV)",
+            data=equity_csv,
+            file_name=f"{ticker}_equity_curves.csv",
+            mime="text/csv",
+        )
+    with col2:
+        st.download_button(
+            "Download strategy metrics (CSV)",
+            data=metrics_csv,
+            file_name=f"{ticker}_strategy_metrics.csv",
+            mime="text/csv",
+        )
 
 
 if __name__ == "__main__":
