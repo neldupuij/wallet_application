@@ -373,7 +373,7 @@ def main():
     st.subheader(f"{ticker} — Price vs Strategies")
 
     price = df_price["Adj Close"]
-    price_norm = price / price.iloc[0]
+    price_real = df_price["Adj Close"]
 
     bh_plot = restrict_range(bh_df.copy(), display_range)
     mom_plot = restrict_range(mom_df.copy(), display_range)
@@ -428,7 +428,7 @@ def main():
         fig.add_trace(
             go.Scatter(
                 x=price_plot.index,
-                y=price_plot["Price_norm"],
+                y=price_plot["Adj Close"],
                 name="Normalized Price (Adj Close)",
                 mode="lines",
                 line=dict(color="lightgray"),
@@ -501,3 +501,20 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Ajout Buy&Hold optimisé
+from quant_a.backtest import optimized_buy_and_hold
+
+if st.button("Run optimized Buy & Hold"):
+    best_date, best_sharpe, best_equity = optimized_buy_and_hold(df_price)
+    st.write(f"Best buy date: {best_date.date()} — Sharpe: {best_sharpe:.2f}")
+    fig.add_trace(
+        go.Scatter(
+            x=best_equity.index,
+            y=best_equity.values,
+            name="Optimized Buy & Hold",
+            mode="lines",
+            line=dict(color="green", dash="dash"),
+        )
+    )
+    st.plotly_chart(fig, use_container_width=True)
