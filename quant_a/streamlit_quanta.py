@@ -96,6 +96,47 @@ def get_data_dir() -> str:
     return data_dir
 
 
+def load_universe() -> pd.DataFrame:
+    """
+    Charge la liste de tickers depuis quant_a/data/universe.csv.
+    Si le fichier n'existe pas, renvoie un petit univers par défaut.
+    """
+    data_dir = get_data_dir()
+    csv_path = os.path.join(data_dir, "universe.csv")
+    if os.path.exists(csv_path):
+        try:
+            df = pd.read_csv(csv_path)
+            if "ticker" in df.columns:
+                if "name" not in df.columns:
+                    df["name"] = ""
+                return df[["ticker", "name"]]
+        except Exception:
+            pass
+
+    data = [
+        ("AAPL", "Apple Inc."),
+        ("MSFT", "Microsoft Corp."),
+        ("GOOGL", "Alphabet Class A"),
+        ("AMZN", "Amazon.com Inc."),
+        ("META", "Meta Platforms"),
+        ("NVDA", "NVIDIA Corp."),
+        ("TSLA", "Tesla Inc."),
+        ("SPY", "SPDR S&P 500 ETF"),
+        ("VOO", "Vanguard S&P 500 ETF"),
+        ("^GSPC", "S&P 500 Index"),
+        ("QQQ", "Invesco QQQ"),
+        ("IWM", "Russell 2000 ETF"),
+        ("GLD", "SPDR Gold Shares"),
+        ("GC=F", "Gold Futures"),
+        ("SI=F", "Silver Futures"),
+        ("CL=F", "Crude Oil WTI"),
+        ("EURUSD=X", "EUR/USD"),
+        ("GBPUSD=X", "GBP/USD"),
+        ("USDJPY=X", "USD/JPY"),
+    ]
+    return pd.DataFrame(data, columns=["ticker", "name"])
+
+
 def main():
     st.set_page_config(
         page_title="Quant A – Single Asset Backtester",
@@ -123,7 +164,30 @@ def main():
     with st.sidebar:
         st.header("Parameters")
 
-        ticker = st.text_input("Ticker", value="AAPL").upper()
+        universe_df = load_universe()
+        universe_df["label"] = universe_df["ticker"] + " — " + universe_df["name"].fillna("")
+
+        mode = st.radio(
+            "Ticker selection",
+            options=["From universe", "Manual"],
+            index=0,
+        )
+
+        if mode == "From universe":
+            selected_label = st.selectbox(
+                "Universe (searchable)",
+                options=universe_df["label"].tolist(),
+            )
+            ticker = universe_df.loc[
+                universe_df["label"] == selected_label, "ticker"
+            ].iloc[0]
+            manual_override = st.text_input(
+                "Override / custom ticker (optional)", value=""
+            ).upper()
+            if manual_override:
+                ticker = manual_override
+        else:
+            ticker = st.text_input("Ticker", value="AAPL").upper()
 
         years_history = st.slider("Years of history", 1, 20, 10)
 
@@ -246,9 +310,6 @@ def main():
         use_container_width=True,
     )
 
-    best_mom_str = ""
-    best_arima_str = ""
-
     if optimize_clicked:
         with st.spinner("Running grid search (this can take some time)…"):
             try:
@@ -269,10 +330,6 @@ def main():
                             "sharpe", ascending=False
                         ).iloc[0]
                         st.session_state["best_momentum_L"] = int(best_mom["lookback"])
-                        best_mom_str = (
-                            f"Best Momentum: L={int(best_mom['lookback'])} "
-                            f"(Sharpe={best_mom['sharpe']:.3f})"
-                        )
 
                     ar_mask = grid_df["strategy"] == "arima"
                     if ar_mask.any():
@@ -283,11 +340,6 @@ def main():
                             int(best_ar["p"]),
                             int(best_ar["d"]),
                             int(best_ar["q"]),
-                        )
-                        best_arima_str = (
-                            f"Best ARIMA: ({int(best_ar['p'])}, "
-                            f"{int(best_ar['d'])}, {int(best_ar['q'])}) "
-                            f"(Sharpe={best_ar['sharpe']:.3f})"
                         )
             except subprocess.CalledProcessError as e:
                 st.error(f"Error while running grid_search: {e}")
