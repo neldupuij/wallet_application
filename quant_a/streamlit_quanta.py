@@ -1,19 +1,22 @@
 ﻿import os
 import sys
-
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
 import warnings
+
 warnings.filterwarnings("ignore")
 
-import os
 from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
+import yfinance as yf
+import plotly.graph_objects as go
+
+# ---- Rendre quant_a importable même si ce fichier est dans quant_a/ ----
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from quant_a.download_data import download_ticker
 from quant_a.backtest import backtest_buy_and_hold, backtest_momentum, backtest_arima
@@ -57,7 +60,7 @@ def compute_metrics_from_equity(equity: pd.Series) -> dict:
 
 
 def filter_range(df: pd.DataFrame, range_label: str) -> pd.DataFrame:
-    """Filtre df sur 5D / 1M / 3M / 6M / 1Y / Max, façon Yahoo Finance."""
+    """Filtre df sur 5D / 1M / 3M / 6M / 1Y / Max."""
     if df.empty or range_label == "Max":
         return df
     end = df.index.max()
@@ -101,6 +104,13 @@ def main():
             horizontal=True,
         )
 
+        chart_type = st.radio(
+            "Chart type",
+            ["Line", "Candlestick"],
+            index=0,
+            horizontal=True,
+        )
+
         run_btn = st.button("Run backtests")
 
     if not run_btn:
@@ -127,7 +137,6 @@ def main():
     try:
         bh_df = backtest_buy_and_hold(df, ticker, save_csv=False)
     except TypeError:
-        # si la fonction n'accepte pas save_csv
         bh_df = backtest_buy_and_hold(df, ticker)
 
     # Momentum
@@ -179,22 +188,100 @@ def main():
     plot_df = filter_range(plot_df, range_label)
 
     st.subheader(f"{ticker} — Price vs Strategies ({range_label})")
-    fig, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(plot_df.index, plot_df["Price"], label="Normalized Price (Adj Close)", color="0.5", alpha=0.7)
-    ax.plot(plot_df.index, plot_df["Buy & Hold"], label="Buy & Hold", linewidth=1.5)
-    ax.plot(plot_df.index, plot_df["Momentum"], label=f"Momentum (L={momentum_L})", linewidth=1.5)
-    if "ARIMA" in plot_df.columns:
-        ax.plot(plot_df.index, plot_df["ARIMA"], label=f"ARIMA{arima_order}", linewidth=1.5)
 
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Normalized value (start = 1)")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
+    if chart_type == "Line":
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(plot_df.index, plot_df["Price"], label="Normalized Price (Adj Close)", color="0.5", alpha=0.7)
+        ax.plot(plot_df.index, plot_df["Buy & Hold"], label="Buy & Hold", linewidth=1.5)
+        ax.plot(plot_df.index, plot_df["Momentum"], label=f"Momentum (L={momentum_L})", linewidth=1.5)
+        if "ARIMA" in plot_df.columns:
+            ax.plot(plot_df.index, plot_df["ARIMA"], label=f"ARIMA{arima_order}", linewidth=1.5)
 
-    st.pyplot(fig)
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Normalized value (start = 1)")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+
+        st.pyplot(fig)
+
+    else:
+        # Candlesticks avec Plotly + stratégies superposées
+        raw = yf.download(ticker, start=start_date, interval="1d", auto_adjust=False, progress=False)
+        if raw.empty:
+            st.warning("Impossible de récupérer les données OHLC pour afficher les bougies.")
+            return
+
+        raw = raw[["Open", "High", "Low", "Close"]].dropna()
+        raw = filter_range(raw, range_label)
+
+        if raw.empty:
+            st.warning("Pas de données OHLC après filtrage pour cette fenêtre de temps.")
+            return
+
+        fig = go.Figure()
+
+        fig.add_trace(
+            go.Candlestick(
+                x=raw.index,
+                open=raw["Open"],
+                high=raw["High"],
+                low=raw["Low"],
+                close=raw["Close"],
+                name="Price (candles)",
+            )
+        )
+
+        # Normaliser les equity pour qu'elles commencent au même niveau que le prix initial
+        base_price = float(raw["Close"].iloc[0])
+
+        def equity_on_candles(eq: pd.Series) -> pd.Series:
+            eq = eq.dropna()
+            if eq.empty:
+                return pd.Series(index=raw.index, dtype=float)
+            eq_norm = eq / eq.iloc[0] * base_price
+            return eq_norm.reindex(raw.index).ffill()
+
+        bh_equity = equity_on_candles(bh_df["Equity"])
+        mom_equity = equity_on_candles(mom_df["Equity"])
+        arima_equity = equity_on_candles(arima_df["Equity"]) if arima_df is not None else None
+
+        fig.add_trace(
+            go.Scatter(
+                x=raw.index,
+                y=bh_equity,
+                mode="lines",
+                name="Buy & Hold",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=raw.index,
+                y=mom_equity,
+                mode="lines",
+                name=f"Momentum (L={momentum_L})",
+            )
+        )
+        if arima_equity is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=raw.index,
+                    y=arima_equity,
+                    mode="lines",
+                    name=f"ARIMA{arima_order}",
+                )
+            )
+
+        fig.update_layout(
+            xaxis_title="Date",
+            yaxis_title="Price / Equity (aligned at start)",
+            xaxis_rangeslider_visible=False,
+            template="plotly_white",
+            height=600,
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
 
 
 if __name__ == "__main__":
     main()
-
