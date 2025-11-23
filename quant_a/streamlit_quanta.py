@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 import yfinance as yf
 
 from quant_a.download_data import download_ticker
-from quant_a.backtest import (
+from quant_a.backtest_arima_fast import backtest_arima\nfrom quant_a.backtest import (
     backtest_buy_and_hold,
     backtest_momentum,
     backtest_arima,
@@ -503,7 +503,7 @@ if __name__ == "__main__":
     main()
 
 # Ajout Buy&Hold optimisé
-from quant_a.backtest import optimized_buy_and_hold
+from quant_a.backtest_arima_fast import backtest_arima\nfrom quant_a.backtest import optimized_buy_and_hold
 
 if st.button("Run optimized Buy & Hold"):
     best_date, best_sharpe, best_equity = optimized_buy_and_hold(df_price)
