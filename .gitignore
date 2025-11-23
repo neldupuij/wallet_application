@@ -3,3 +3,7 @@
 *.log
 __pycache__/
 .venv/
+.venv/
+__pycache__/
+*.pyc
+quant_a/data/*.csv
