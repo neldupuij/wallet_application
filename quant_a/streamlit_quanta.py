@@ -11,16 +11,16 @@ from download_data import download_ticker
 from backtest import (
     backtest_buy_and_hold,
     backtest_momentum,
-    backtest_arima,
+    backtest_arima
 )
 
 warnings.filterwarnings("ignore")
-
 
 # ------------------------------------------------------------
 # METRICS
 # ------------------------------------------------------------
 def compute_metrics(equity: pd.Series):
+    """Compute Return, Vol, Sharpe, MaxDD."""
     equity = equity.astype(float)
     returns = equity.pct_change().dropna()
 
@@ -47,23 +47,20 @@ def main():
     st.set_page_config(page_title="Quant A", layout="wide")
 
     st.title("📈 Quant A – Single Asset Backtesting")
-    st.caption("Buy & Hold • Momentum • ARIMA • Grid Search • Optimal Parameters")
+    st.caption("Buy & Hold • Momentum • ARIMA • Grid Search • Forecast")
 
     # ---------------- Sidebar ----------------
     st.sidebar.header("Parameters")
 
-    base_tickers = ["AAPL", "MSFT", "NVDA", "GOOG", "TSLA", "SPY", "EURUSD=X", "BTC-USD"]
-    choice = st.sidebar.selectbox("Choose asset", ["Custom ticker"] + base_tickers)
+    tickers = ["AAPL", "MSFT", "NVDA", "GOOG", "TSLA", "SPY", "EURUSD=X", "BTC-USD"]
+    choice = st.sidebar.selectbox("Choose asset", ["Custom ticker"] + tickers)
 
-    ticker = st.sidebar.text_input(
-        "Enter ticker",
-        choice if choice != "Custom ticker" else "AAPL"
-    ).upper()
+    ticker = st.sidebar.text_input("Enter ticker", choice if choice != "Custom ticker" else "AAPL").upper()
 
     start_date = st.sidebar.date_input(
         "Start date",
         value=datetime(2015, 1, 1),
-        format="YYYY/MM/DD",
+        format="YYYY/MM/DD"
     ).strftime("%Y-%m-%d")
 
     initial_equity = st.sidebar.number_input("Initial investment", value=10000, step=100)
@@ -71,7 +68,7 @@ def main():
     st.sidebar.subheader("Momentum")
     momentum_lb = st.sidebar.slider("Lookback", 2, 120, 20)
 
-    st.sidebar.subheader("ARIMA order (p,d,q)")
+    st.sidebar.subheader("ARIMA (p,d,q)")
     p = st.sidebar.slider("p", 0, 5, 1)
     d = st.sidebar.slider("d", 0, 2, 0)
     q = st.sidebar.slider("q", 0, 5, 1)
@@ -93,11 +90,12 @@ def main():
         st.info("Configure parameters then click Run.")
         return
 
-    # ---------------- Data loading ----------------
+    # --------------------------------------------------------
+    # Load data
+    # --------------------------------------------------------
     try:
         df = download_ticker(ticker, start_date)
-        df = df[~df.index.duplicated()]  # remove duplicated dates
-        df = df.dropna()                  # remove rows with NaN
+        df = df[~df.index.duplicated()].dropna()
     except Exception as e:
         st.error(f"Error downloading data: {e}")
         return
@@ -106,17 +104,23 @@ def main():
         st.error("Downloaded data is empty.")
         return
 
-    # ---------------- Backtests (base = 1) ----------------
+    # --------------------------------------------------------
+    # Run Backtests
+    # --------------------------------------------------------
     bh = backtest_buy_and_hold(df)
     mom = backtest_momentum(df, momentum_lb)
-    ari = backtest_arima(df, (p, d, q))
 
-    # Scale portfolios to real money
+    # ARIMA now returns (equity_df, forecast_df)
+    ari, ari_future = backtest_arima(df, (p, d, q), forecast_horizon=30)
+
+    # Scale equity curves
     bh["Equity"] *= initial_equity
     mom["Equity"] *= initial_equity
     ari["Equity"] *= initial_equity
 
-    # ---------------- Performance metrics ----------------
+    # --------------------------------------------------------
+    # Performance Metrics
+    # --------------------------------------------------------
     st.subheader("📊 Performance Metrics")
 
     metrics = pd.DataFrame(
@@ -128,60 +132,69 @@ def main():
     ).T
 
     st.dataframe(
-        metrics.style.format(
-            {
-                "Return": "{:.2%}",
-                "Vol": "{:.2%}",
-                "Sharpe": "{:.2f}",
-                "MaxDD": "{:.2%}",
-            }
-        ),
+        metrics.style.format({
+            "Return": "{:.2%}",
+            "Vol": "{:.2%}",
+            "Sharpe": "{:.2f}",
+            "MaxDD": "{:.2%}",
+        }),
         use_container_width=True,
     )
 
-    # ---------------- View range filtering ----------------
-    def filter_range(data: pd.DataFrame) -> pd.DataFrame:
+    # --------------------------------------------------------
+    # View Range Filtering
+    # --------------------------------------------------------
+    def filter_range(df):
         if view_range == "MAX":
-            return data
+            return df
 
         days = {
-            "1W": 7,
-            "1M": 30,
-            "3M": 90,
-            "6M": 180,
-            "1Y": 365,
-            "5Y": 365 * 5,
+            "1W": 7, "1M": 30, "3M": 90,
+            "6M": 180, "1Y": 365, "5Y": 365 * 5
         }[view_range]
 
-        return data.iloc[-days:]
+        return df.iloc[-days:]
 
     df_v = filter_range(df)
     bh_v = filter_range(bh)
     mom_v = filter_range(mom)
     ari_v = filter_range(ari)
 
-    # ---------------- Price chart (line only) ----------------
+    # --------------------------------------------------------
+    # PRICE CHART + FORECAST
+    # --------------------------------------------------------
     st.subheader("📉 Price Chart")
 
     fig_price = go.Figure()
-    fig_price.add_trace(
-        go.Scatter(
-            x=df_v.index,
-            y=df_v["Adj Close"],
-            name="Price",
-            line=dict(color="#4c78ff", width=2),
-        )
-    )
+
+    fig_price.add_trace(go.Scatter(
+        x=df_v.index,
+        y=df_v["Adj Close"],
+        name=f"{ticker} Price",
+        line=dict(color="#4c78ff", width=2),
+    ))
+
+    if ari_future is not None:
+        fig_price.add_trace(go.Scatter(
+            x=ari_future.index,
+            y=ari_future["ForecastPrice"],
+            name="ARIMA Forecast 30d",
+            mode="lines",
+            line=dict(color="orange", width=2, dash="dot"),
+        ))
 
     fig_price.update_layout(
         template="plotly_dark",
-        height=420,
-        yaxis_title="Price",
+        height=400,
         xaxis_title="Date",
+        yaxis_title="Price"
     )
+
     st.plotly_chart(fig_price, use_container_width=True)
 
-    # ---------------- Portfolio Value chart ----------------
+    # --------------------------------------------------------
+    # PORTFOLIO VALUE
+    # --------------------------------------------------------
     st.subheader(f"💰 Portfolio Value (Initial = ${initial_equity:,})")
 
     fig = go.Figure()
@@ -192,15 +205,22 @@ def main():
     fig.update_layout(
         template="plotly_dark",
         height=450,
-        yaxis_title="Portfolio Value ($)",
         xaxis_title="Date",
+        yaxis_title="Portfolio Value ($)",
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # ---------------- GRID SEARCH ----------------
+    # --------------------------------------------------------
+    # GRID SEARCH
+    # --------------------------------------------------------
+    st.subheader("🏆 Optimal Parameters Summary")
+
     best_L = None
     best_L_sharpe = -999
+    best_arima = None
+    best_arima_sharpe = -999
 
+    # Momentum Grid Search
     if gs_mom:
         st.subheader("🔥 Momentum Grid Search")
         results = []
@@ -214,62 +234,61 @@ def main():
                 best_L = L
                 best_L_sharpe = sharpe
 
-        mom_df = pd.DataFrame(results, columns=["Lookback", "Sharpe"]).set_index("Lookback")
-        st.line_chart(mom_df)
+        st.line_chart(pd.DataFrame(results, columns=["L", "Sharpe"]).set_index("L"))
 
-    best_arima = None
-    best_arima_sharpe = -999
-
+    # ARIMA Grid Search
     if gs_ari:
         st.subheader("🔥 ARIMA Grid Search")
-
         results = []
+
         for P in range(0, 6):
             for D in range(0, 2):
                 for Q in range(0, 6):
-                    eq = backtest_arima(df, (P, D, Q))["Equity"]
-                    sharpe = compute_metrics(eq)["Sharpe"]
+                    eq, _ = backtest_arima(df, (P, D, Q))
+                    sharpe = compute_metrics(eq["Equity"])["Sharpe"]
                     results.append((P, D, Q, sharpe))
 
                     if sharpe > best_arima_sharpe:
                         best_arima = (P, D, Q)
                         best_arima_sharpe = sharpe
 
-        ari_df = pd.DataFrame(results, columns=["p", "d", "q", "Sharpe"])
-        st.dataframe(ari_df.sort_values("Sharpe", ascending=False), use_container_width=True)
+        st.dataframe(
+            pd.DataFrame(results, columns=["p", "d", "q", "Sharpe"]).sort_values("Sharpe", ascending=False),
+            use_container_width=True
+        )
 
-    # ---------------- BEST PARAMETERS SUMMARY ----------------
-    st.subheader("🏆 Optimal Parameters Summary")
-
+    # Summary Table
     summary = []
     if best_L is not None:
-        summary.append(["Momentum", f"L = {best_L}", best_L_sharpe])
+        summary.append(["Momentum", f"L={best_L}", best_L_sharpe])
     if best_arima is not None:
         summary.append(["ARIMA", str(best_arima), best_arima_sharpe])
 
     if summary:
-        df_sum = pd.DataFrame(summary, columns=["Strategy", "Optimal Parameters", "Sharpe"])
-        st.dataframe(df_sum.style.format({"Sharpe": "{:.4f}"}), use_container_width=True)
+        st.dataframe(
+            pd.DataFrame(summary, columns=["Strategy", "Optimal Parameters", "Sharpe"]),
+            use_container_width=True
+        )
     else:
         st.info("No optimal parameters found.")
 
-    # ---------------- CSV EXPORT ----------------
+    # --------------------------------------------------------
+    # CSV EXPORT
+    # --------------------------------------------------------
     st.subheader("⬇ Download Results")
 
-    out = pd.DataFrame(
-        {
-            "Price": df["Adj Close"],
-            "BH": bh["Equity"],
-            "Momentum": mom["Equity"],
-            "ARIMA": ari["Equity"],
-        }
-    )
+    out = pd.DataFrame({
+        "Price": df["Adj Close"],
+        "BH": bh["Equity"],
+        "Momentum": mom["Equity"],
+        "ARIMA": ari["Equity"],
+    })
 
     st.download_button(
         "Download CSV",
         out.to_csv().encode(),
         file_name=f"{ticker}_portfolio_value.csv",
-        mime="text/csv",
+        mime="text/csv"
     )
 
 
