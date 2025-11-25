@@ -1,5 +1,5 @@
 ﻿import os
-from datetime import datetime, timedelta
+from datetime import datetime
 import warnings
 
 import numpy as np
@@ -14,17 +14,17 @@ from backtest import (
     backtest_arima,
 )
 
-warnings.filterwarnings("ignore")   # remove ARIMA + statsmodels spam
+warnings.filterwarnings("ignore")
 
 
 # ------------------------------------------------------------
 # METRICS
 # ------------------------------------------------------------
 def compute_metrics(equity: pd.Series):
-    equity = equity.squeeze()
+    equity = equity.astype(float)
     returns = equity.pct_change().dropna()
 
-    if returns.empty or len(equity) < 2:
+    if returns.empty or equity.iloc[0] == 0:
         return {"Return": 0.0, "Vol": 0.0, "Sharpe": 0.0, "MaxDD": 0.0}
 
     ann_return = (equity.iloc[-1] / equity.iloc[0]) ** (252 / len(equity)) - 1
@@ -44,14 +44,10 @@ def compute_metrics(equity: pd.Series):
 # STREAMLIT APP
 # ------------------------------------------------------------
 def main():
-    st.set_page_config(
-        page_title="Quant A – Backtesting Suite (Dark)",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
+    st.set_page_config(page_title="Quant A", layout="wide")
 
     st.title("📈 Quant A – Single Asset Backtesting")
-    st.caption("Buy & Hold • Momentum • ARIMA • Grid Search • Optimal Parameters • Price View Selector")
+    st.caption("Buy & Hold • Momentum • ARIMA • Grid Search • Optimal Parameters")
 
     # ---------------- Sidebar ----------------
     st.sidebar.header("Parameters")
@@ -59,10 +55,10 @@ def main():
     base_tickers = ["AAPL", "MSFT", "NVDA", "GOOG", "TSLA", "SPY", "EURUSD=X", "BTC-USD"]
     choice = st.sidebar.selectbox("Choose asset", ["Custom ticker"] + base_tickers)
 
-    if choice == "Custom ticker":
-        ticker = st.sidebar.text_input("Enter ticker", "AAPL").upper()
-    else:
-        ticker = choice
+    ticker = st.sidebar.text_input(
+        "Enter ticker",
+        choice if choice != "Custom ticker" else "AAPL"
+    ).upper()
 
     start_date = st.sidebar.date_input(
         "Start date",
@@ -70,16 +66,10 @@ def main():
         format="YYYY/MM/DD",
     ).strftime("%Y-%m-%d")
 
-    initial_equity = st.sidebar.number_input(
-        "Initial investment",
-        min_value=100,
-        max_value=1_000_000_000,
-        value=10_000,
-        step=100
-    )
+    initial_equity = st.sidebar.number_input("Initial investment", value=10000, step=100)
 
     st.sidebar.subheader("Momentum")
-    momentum_lb = st.sidebar.slider("Lookback (days)", 2, 120, 20)
+    momentum_lb = st.sidebar.slider("Lookback", 2, 120, 20)
 
     st.sidebar.subheader("ARIMA order (p,d,q)")
     p = st.sidebar.slider("p", 0, 5, 1)
@@ -92,26 +82,22 @@ def main():
 
     st.sidebar.subheader("View range")
     view_range = st.sidebar.selectbox(
-        "Display period", ["1W", "1M", "3M", "6M", "1Y", "5Y", "MAX"], index=6
-    )
-
-    st.sidebar.subheader("Price chart style")
-    price_chart_type = st.sidebar.selectbox(
-        "Chart type",
-        ["Line", "Candlesticks"],
-        index=0,
+        "Display period",
+        ["1W", "1M", "3M", "6M", "1Y", "5Y", "MAX"],
+        index=6
     )
 
     run_bt = st.sidebar.button("🚀 Run Backtests")
 
     if not run_bt:
-        st.info("Configure parameters in the sidebar and click **Run Backtests**.")
+        st.info("Configure parameters then click Run.")
         return
 
     # ---------------- Data loading ----------------
     try:
-        # IMPORTANT : on ne touche pas à download_ticker, on force juste une fréquence business
-        df = download_ticker(ticker, start_date).asfreq("B")
+        df = download_ticker(ticker, start_date)
+        df = df[~df.index.duplicated()]  # remove duplicated dates
+        df = df.dropna()                  # remove rows with NaN
     except Exception as e:
         st.error(f"Error downloading data: {e}")
         return
@@ -120,169 +106,139 @@ def main():
         st.error("Downloaded data is empty.")
         return
 
-    # ---------------- Backtests ----------------
-    bh = backtest_buy_and_hold(df).copy()
-    mom = backtest_momentum(df, momentum_lb).copy()
-    ari = backtest_arima(df, (p, d, q)).copy()
+    # ---------------- Backtests (base = 1) ----------------
+    bh = backtest_buy_and_hold(df)
+    mom = backtest_momentum(df, momentum_lb)
+    ari = backtest_arima(df, (p, d, q))
 
-    # Scale to real money
+    # Scale portfolios to real money
     bh["Equity"] *= initial_equity
     mom["Equity"] *= initial_equity
     ari["Equity"] *= initial_equity
 
-    # ----------- Time range filter -------------
-    def filter_range(df_in: pd.DataFrame) -> pd.DataFrame:
+    # ---------------- Performance metrics ----------------
+    st.subheader("📊 Performance Metrics")
+
+    metrics = pd.DataFrame(
+        {
+            "Buy & Hold": compute_metrics(bh["Equity"]),
+            f"Momentum (L={momentum_lb})": compute_metrics(mom["Equity"]),
+            f"ARIMA({p},{d},{q})": compute_metrics(ari["Equity"]),
+        }
+    ).T
+
+    st.dataframe(
+        metrics.style.format(
+            {
+                "Return": "{:.2%}",
+                "Vol": "{:.2%}",
+                "Sharpe": "{:.2f}",
+                "MaxDD": "{:.2%}",
+            }
+        ),
+        use_container_width=True,
+    )
+
+    # ---------------- View range filtering ----------------
+    def filter_range(data: pd.DataFrame) -> pd.DataFrame:
         if view_range == "MAX":
-            return df_in
+            return data
+
         days = {
             "1W": 7,
             "1M": 30,
             "3M": 90,
             "6M": 180,
             "1Y": 365,
-            "5Y": 365 * 5
+            "5Y": 365 * 5,
         }[view_range]
-        return df_in.iloc[-days:]
+
+        return data.iloc[-days:]
 
     df_v = filter_range(df)
     bh_v = filter_range(bh)
     mom_v = filter_range(mom)
     ari_v = filter_range(ari)
 
-    # ---------------- Price Chart ----------------
+    # ---------------- Price chart (line only) ----------------
     st.subheader("📉 Price Chart")
 
     fig_price = go.Figure()
-
-    ohlc_cols = all(col in df_v.columns for col in ["Open", "High", "Low", "Close"])
-
-    if price_chart_type == "Candlesticks" and ohlc_cols:
-        # Candlestick style (TradingView-like)
-        fig_price.add_trace(
-            go.Candlestick(
-                x=df_v.index,
-                open=df_v["Open"],
-                high=df_v["High"],
-                low=df_v["Low"],
-                close=df_v["Close"],
-                name=f"{ticker} OHLC",
-            )
+    fig_price.add_trace(
+        go.Scatter(
+            x=df_v.index,
+            y=df_v["Adj Close"],
+            name="Price",
+            line=dict(color="#4c78ff", width=2),
         )
-        # Optional overlay of Adj Close as line if exists
-        if "Adj Close" in df_v.columns:
-            fig_price.add_trace(
-                go.Scatter(
-                    x=df_v.index,
-                    y=df_v["Adj Close"],
-                    name="Adj Close",
-                    line=dict(color="#4c78ff", width=1.2),
-                    opacity=0.7,
-                    yaxis="y",
-                )
-            )
-    else:
-        # Fallback : line chart on adjusted close
-        fig_price.add_trace(
-            go.Scatter(
-                x=df_v.index,
-                y=df_v["Adj Close"],
-                name=f"{ticker} Price",
-                line=dict(color="#4c78ff", width=2),
-            )
-        )
+    )
 
     fig_price.update_layout(
         template="plotly_dark",
         height=420,
-        margin=dict(l=40, r=20, t=40, b=40),
         yaxis_title="Price",
         xaxis_title="Date",
-        showlegend=True,
     )
-
-    # watermark style ticker in background (light)
-    fig_price.add_annotation(
-        text=ticker,
-        xref="paper", yref="paper",
-        x=0.5, y=0.5,
-        showarrow=False,
-        font=dict(size=72, color="rgba(255,255,255,0.06)"),
-        xanchor="center", yanchor="middle"
-    )
-
     st.plotly_chart(fig_price, use_container_width=True)
 
-    # ---------------- Portfolio Value Chart ----------------
+    # ---------------- Portfolio Value chart ----------------
     st.subheader(f"💰 Portfolio Value (Initial = ${initial_equity:,})")
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=bh_v.index, y=bh_v["Equity"], name="Buy & Hold", line=dict(width=2)))
+    fig.add_trace(go.Scatter(x=bh_v.index, y=bh_v["Equity"], name="Buy & Hold"))
     fig.add_trace(go.Scatter(x=mom_v.index, y=mom_v["Equity"], name=f"Momentum L={momentum_lb}"))
     fig.add_trace(go.Scatter(x=ari_v.index, y=ari_v["Equity"], name=f"ARIMA({p},{d},{q})"))
 
     fig.update_layout(
         template="plotly_dark",
         height=450,
-        margin=dict(l=40, r=20, t=40, b=40),
         yaxis_title="Portfolio Value ($)",
         xaxis_title="Date",
-        showlegend=True,
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # ------------------------------------------------------------
-    # MOMENTUM GRID SEARCH
-    # ------------------------------------------------------------
+    # ---------------- GRID SEARCH ----------------
     best_L = None
     best_L_sharpe = -999
 
     if gs_mom:
         st.subheader("🔥 Momentum Grid Search")
-
         results = []
+
         for L in range(2, 121):
-            try:
-                eq = backtest_momentum(df, L)["Equity"] * initial_equity
-                sharpe = compute_metrics(eq)["Sharpe"]
-                results.append((L, sharpe))
-                if sharpe > best_L_sharpe:
-                    best_L = L
-                    best_L_sharpe = sharpe
-            except Exception:
-                results.append((L, np.nan))
+            eq = backtest_momentum(df, L)["Equity"]
+            sharpe = compute_metrics(eq)["Sharpe"]
+            results.append((L, sharpe))
+
+            if sharpe > best_L_sharpe:
+                best_L = L
+                best_L_sharpe = sharpe
 
         mom_df = pd.DataFrame(results, columns=["Lookback", "Sharpe"]).set_index("Lookback")
         st.line_chart(mom_df)
 
-    # ------------------------------------------------------------
-    # ARIMA GRID SEARCH
-    # ------------------------------------------------------------
     best_arima = None
     best_arima_sharpe = -999
 
     if gs_ari:
-        st.subheader("🔥 ARIMA Grid Search (Sharpe)")
+        st.subheader("🔥 ARIMA Grid Search")
 
         results = []
         for P in range(0, 6):
             for D in range(0, 2):
                 for Q in range(0, 6):
-                    try:
-                        eq = backtest_arima(df, (P, D, Q))["Equity"] * initial_equity
-                        sharpe = compute_metrics(eq)["Sharpe"]
-                        results.append((P, D, Q, sharpe))
-                        if sharpe > best_arima_sharpe:
-                            best_arima = (P, D, Q)
-                            best_arima_sharpe = sharpe
-                    except Exception:
-                        results.append((P, D, Q, np.nan))
+                    eq = backtest_arima(df, (P, D, Q))["Equity"]
+                    sharpe = compute_metrics(eq)["Sharpe"]
+                    results.append((P, D, Q, sharpe))
+
+                    if sharpe > best_arima_sharpe:
+                        best_arima = (P, D, Q)
+                        best_arima_sharpe = sharpe
 
         ari_df = pd.DataFrame(results, columns=["p", "d", "q", "Sharpe"])
         st.dataframe(ari_df.sort_values("Sharpe", ascending=False), use_container_width=True)
 
-    # ------------------------------------------------------------
-    # BEST PARAMETERS SUMMARY
-    # ------------------------------------------------------------
+    # ---------------- BEST PARAMETERS SUMMARY ----------------
     st.subheader("🏆 Optimal Parameters Summary")
 
     summary = []
@@ -297,7 +253,7 @@ def main():
     else:
         st.info("No optimal parameters found.")
 
-    # ---------------- CSV Export ----------------
+    # ---------------- CSV EXPORT ----------------
     st.subheader("⬇ Download Results")
 
     out = pd.DataFrame(
