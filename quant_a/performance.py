@@ -1,54 +1,68 @@
-﻿import pandas as pd
-import numpy as np
-import os
+﻿import numpy as np
+import pandas as pd
 
-class PerformanceMetrics:
-    """
-    Compute and export basic performance metrics for a single asset.
-    """
 
-    def __init__(self, df: pd.DataFrame, ticker: str = "TICKER"):
-        if "Adj Close" not in df.columns:
-            raise ValueError("DataFrame must contain an 'Adj Close' column.")
-        self.ticker = ticker.upper()
-        self.df = df.copy()
-        self.df["Return"] = self.df["Adj Close"].pct_change()
-        self.df.dropna(inplace=True)
-
-    def cumulative_return(self):
-        """Compute cumulative return of a buy-and-hold strategy."""
-        self.df["Cumulative"] = (1 + self.df["Return"]).cumprod()
-        return self.df
-
-    def annualized_metrics(self, risk_free_rate=0.0, save_csv=True):
-        """Compute and optionally save annualized metrics."""
-        mean_daily = self.df["Return"].mean()
-        std_daily = self.df["Return"].std()
-
-        ann_return = (1 + mean_daily) ** 252 - 1
-        ann_vol = std_daily * np.sqrt(252)
-        sharpe = (ann_return - risk_free_rate) / ann_vol if ann_vol != 0 else np.nan
-
-        cum_returns = (1 + self.df["Return"]).cumprod()
-        rolling_max = cum_returns.cummax()
-        drawdown = (cum_returns - rolling_max) / rolling_max
-        max_dd = drawdown.min()
-
-        metrics = {
-            "Ticker": self.ticker,
-            "Annual Return": ann_return,
-            "Annual Volatility": ann_vol,
-            "Sharpe Ratio": sharpe,
-            "Max Drawdown": max_dd,
+def _empty_metrics() -> pd.Series:
+    return pd.Series(
+        {
+            "final_equity": np.nan,
+            "annual_return": np.nan,
+            "annual_vol": np.nan,
+            "sharpe": np.nan,
+            "max_drawdown": np.nan,
         }
+    )
 
-        metrics_df = pd.DataFrame([metrics])
 
-        if save_csv:
-            save_dir = os.path.join("quant_a", "data")
-            os.makedirs(save_dir, exist_ok=True)
-            filename = os.path.join(save_dir, f"METRICS_{self.ticker}.csv")
-            metrics_df.to_csv(filename, index=False)
-            print(f"✅ Metrics saved to {filename}")
+def compute_metrics_df(equity: pd.Series) -> pd.Series:
+    """
+    equity : série de la valeur du portefeuille (Equity) dans le temps.
+    Retourne une Series avec les métriques standardisées.
+    """
+    if equity is None:
+        return _empty_metrics()
 
-        return metrics
+    equity = equity.dropna()
+    if equity.empty:
+        return _empty_metrics()
+
+    # Rendements quotidiens
+    returns = equity.pct_change().dropna()
+    if returns.empty:
+        return _empty_metrics()
+
+    n = len(equity)
+    # On suppose des données daily, 252 jours ouvrés
+    annual_factor = 252 / n
+
+    final_equity = float(equity.iloc[-1])
+    annual_return = float((equity.iloc[-1] / equity.iloc[0]) ** annual_factor - 1.0)
+
+    annual_vol = float(returns.std() * np.sqrt(252))
+    sharpe = float(annual_return / annual_vol) if annual_vol != 0 else np.nan
+
+    # Max drawdown
+    roll_max = equity.cummax()
+    drawdown = equity / roll_max - 1.0
+    max_drawdown = float(drawdown.min())
+
+    return pd.Series(
+        {
+            "final_equity": final_equity,
+            "annual_return": annual_return,
+            "annual_vol": annual_vol,
+            "sharpe": sharpe,
+            "max_drawdown": max_drawdown,
+        }
+    )
+
+
+def compute_metrics_dict(equity: pd.Series, name: str) -> dict:
+    """
+    Wrapper pratique pour retourner un dict prêt à être mis dans un DataFrame.
+    name : nom de la stratégie (ex: "Buy & Hold", "Momentum (L=20)", "ARIMA(2,0,1)", etc.)
+    """
+    s = compute_metrics_df(equity)
+    d = s.to_dict()
+    d["strategy"] = name
+    return d
