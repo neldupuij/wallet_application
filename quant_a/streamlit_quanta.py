@@ -14,7 +14,7 @@ from backtest import (
     backtest_arima,
 )
 
-warnings.filterwarnings("ignore")   # <<< remove ARIMA warnings
+warnings.filterwarnings("ignore")   # remove ARIMA + statsmodels spam
 
 
 # ------------------------------------------------------------
@@ -95,6 +95,13 @@ def main():
         "Display period", ["1W", "1M", "3M", "6M", "1Y", "5Y", "MAX"], index=6
     )
 
+    st.sidebar.subheader("Price chart style")
+    price_chart_type = st.sidebar.selectbox(
+        "Chart type",
+        ["Line", "Candlesticks"],
+        index=0,
+    )
+
     run_bt = st.sidebar.button("🚀 Run Backtests")
 
     if not run_bt:
@@ -103,6 +110,7 @@ def main():
 
     # ---------------- Data loading ----------------
     try:
+        # IMPORTANT : on ne touche pas à download_ticker, on force juste une fréquence business
         df = download_ticker(ticker, start_date).asfreq("B")
     except Exception as e:
         st.error(f"Error downloading data: {e}")
@@ -123,9 +131,9 @@ def main():
     ari["Equity"] *= initial_equity
 
     # ----------- Time range filter -------------
-    def filter_range(df):
+    def filter_range(df_in: pd.DataFrame) -> pd.DataFrame:
         if view_range == "MAX":
-            return df
+            return df_in
         days = {
             "1W": 7,
             "1M": 30,
@@ -134,7 +142,7 @@ def main():
             "1Y": 365,
             "5Y": 365 * 5
         }[view_range]
-        return df.iloc[-days:]
+        return df_in.iloc[-days:]
 
     df_v = filter_range(df)
     bh_v = filter_range(bh)
@@ -145,20 +153,63 @@ def main():
     st.subheader("📉 Price Chart")
 
     fig_price = go.Figure()
-    fig_price.add_trace(
-        go.Scatter(
-            x=df_v.index,
-            y=df_v["Adj Close"],
-            name=f"{ticker} Price",
-            line=dict(color="#4c78ff", width=2),
+
+    ohlc_cols = all(col in df_v.columns for col in ["Open", "High", "Low", "Close"])
+
+    if price_chart_type == "Candlesticks" and ohlc_cols:
+        # Candlestick style (TradingView-like)
+        fig_price.add_trace(
+            go.Candlestick(
+                x=df_v.index,
+                open=df_v["Open"],
+                high=df_v["High"],
+                low=df_v["Low"],
+                close=df_v["Close"],
+                name=f"{ticker} OHLC",
+            )
         )
-    )
+        # Optional overlay of Adj Close as line if exists
+        if "Adj Close" in df_v.columns:
+            fig_price.add_trace(
+                go.Scatter(
+                    x=df_v.index,
+                    y=df_v["Adj Close"],
+                    name="Adj Close",
+                    line=dict(color="#4c78ff", width=1.2),
+                    opacity=0.7,
+                    yaxis="y",
+                )
+            )
+    else:
+        # Fallback : line chart on adjusted close
+        fig_price.add_trace(
+            go.Scatter(
+                x=df_v.index,
+                y=df_v["Adj Close"],
+                name=f"{ticker} Price",
+                line=dict(color="#4c78ff", width=2),
+            )
+        )
+
     fig_price.update_layout(
         template="plotly_dark",
-        height=350,
+        height=420,
         margin=dict(l=40, r=20, t=40, b=40),
         yaxis_title="Price",
+        xaxis_title="Date",
+        showlegend=True,
     )
+
+    # watermark style ticker in background (light)
+    fig_price.add_annotation(
+        text=ticker,
+        xref="paper", yref="paper",
+        x=0.5, y=0.5,
+        showarrow=False,
+        font=dict(size=72, color="rgba(255,255,255,0.06)"),
+        xanchor="center", yanchor="middle"
+    )
+
     st.plotly_chart(fig_price, use_container_width=True)
 
     # ---------------- Portfolio Value Chart ----------------
@@ -174,6 +225,8 @@ def main():
         height=450,
         margin=dict(l=40, r=20, t=40, b=40),
         yaxis_title="Portfolio Value ($)",
+        xaxis_title="Date",
+        showlegend=True,
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -195,7 +248,7 @@ def main():
                 if sharpe > best_L_sharpe:
                     best_L = L
                     best_L_sharpe = sharpe
-            except:
+            except Exception:
                 results.append((L, np.nan))
 
         mom_df = pd.DataFrame(results, columns=["Lookback", "Sharpe"]).set_index("Lookback")
@@ -221,7 +274,7 @@ def main():
                         if sharpe > best_arima_sharpe:
                             best_arima = (P, D, Q)
                             best_arima_sharpe = sharpe
-                    except:
+                    except Exception:
                         results.append((P, D, Q, np.nan))
 
         ari_df = pd.DataFrame(results, columns=["p", "d", "q", "Sharpe"])
