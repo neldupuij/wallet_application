@@ -3,38 +3,38 @@ from typing import Mapping, Sequence
 import pandas as pd
 
 from quant_B.metrics import (
-    daily_returns,
     annualized_return,
     annualized_volatility,
     sharpe_ratio,
 )
 
 
-def asset_metrics(prices: pd.DataFrame) -> pd.DataFrame:
+def asset_metrics(prices: pd.DataFrame, risk_free_rate: float = 0.0) -> pd.DataFrame:
     """
-    Compute annualized return, volatility and Sharpe ratio for each asset.
+    Compute asset-level metrics using Quant_A's PerformanceMetrics via Quant_B.metrics.
 
     Parameters
     ----------
     prices : pd.DataFrame
-        Price matrix with columns = tickers.
+        Price matrix, columns = tickers.
+    risk_free_rate : float
+        Annual risk-free rate.
 
     Returns
     -------
     pd.DataFrame
         Index = tickers, columns = ["Annual Return", "Annual Volatility", "Sharpe"].
     """
-    rets = prices.pct_change().dropna()
     rows = []
 
     for col in prices.columns:
-        r = rets[col].dropna()
+        series = prices[col].dropna()
         rows.append(
             {
                 "Ticker": col,
-                "Annual Return": annualized_return(r),
-                "Annual Volatility": annualized_volatility(r),
-                "Sharpe": sharpe_ratio(r),
+                "Annual Return": annualized_return(series, risk_free_rate),
+                "Annual Volatility": annualized_volatility(series, risk_free_rate),
+                "Sharpe": sharpe_ratio(series, risk_free_rate),
             }
         )
 
