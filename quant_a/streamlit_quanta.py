@@ -48,9 +48,19 @@ def main():
     st.set_page_config(page_title="Quant A", layout="wide")
 
     st.title("📈 Quant A – Single Asset Backtesting")
-    st.caption("Buy & Hold • Momentum • ARIMA • Grid Search • Forecast")
+    st.caption("Buy & Hold • Momentum • ARIMA • Grid Search • Forecast • Stable UI")
 
-    # Sidebar ----------------
+    # --------------------------------------------------------
+    # Session state initialisation
+    # --------------------------------------------------------
+    if "results" not in st.session_state:
+        st.session_state.results = None
+    if "gs_results" not in st.session_state:
+        st.session_state.gs_results = None
+
+    # --------------------------------------------------------
+    # Sidebar
+    # --------------------------------------------------------
     st.sidebar.header("Parameters")
 
     tickers = ["AAPL", "MSFT", "NVDA", "GOOG", "TSLA", "SPY", "EURUSD=X", "BTC-USD"]
@@ -58,13 +68,13 @@ def main():
 
     ticker = st.sidebar.text_input(
         "Enter ticker",
-        choice if choice != "Custom ticker" else "AAPL",
+        choice if choice != "Custom ticker" else "AAPL"
     ).upper()
 
     start_date = st.sidebar.date_input(
         "Start date",
         value=datetime(2015, 1, 1),
-        format="YYYY/MM/DD",
+        format="YYYY/MM/DD"
     ).strftime("%Y-%m-%d")
 
     initial_equity = st.sidebar.number_input("Initial investment", value=10000, step=100)
@@ -90,38 +100,99 @@ def main():
 
     run_bt = st.sidebar.button("🚀 Run Backtests")
 
-    if not run_bt:
+    # --------------------------------------------------------
+    # RUN BACKTESTS ONLY WHEN BUTTON IS CLICKED
+    # --------------------------------------------------------
+    if run_bt:
+        try:
+            df = download_ticker(ticker, start_date)
+            df = df[~df.index.duplicated()].dropna()
+        except Exception as e:
+            st.error(f"Error downloading data: {e}")
+            return
+
+        # Run strategies
+        bh = backtest_buy_and_hold(df)
+        mom = backtest_momentum(df, momentum_lb)
+        ari, ari_future = backtest_arima(df, (p, d, q), forecast_horizon=30)
+
+        # Scale equity
+        bh["Equity"] *= initial_equity
+        mom["Equity"] *= initial_equity
+        ari["Equity"] *= initial_equity
+
+        # Save results
+        st.session_state.results = {
+            "df": df,
+            "bh": bh,
+            "mom": mom,
+            "ari": ari,
+            "ari_future": ari_future,
+            "momentum_lb": momentum_lb,
+            "order": (p, d, q),
+            "initial_equity": initial_equity,
+            "view_range": view_range
+        }
+
+        # ---------------- GRID SEARCH (only once per run_bt)
+        gs_output = {}
+
+        # Momentum GS
+        if gs_mom:
+            mom_list = []
+            best_L = None
+            best_sharpe = -999
+
+            for L in range(2, 121):
+                eq = backtest_momentum(df, L)["Equity"]
+                s = compute_metrics(eq)["Sharpe"]
+                mom_list.append((L, s))
+                if s > best_sharpe:
+                    best_L, best_sharpe = L, s
+
+            gs_output["mom"] = (mom_list, best_L, best_sharpe)
+
+        # ARIMA GS
+        if gs_ari:
+            ari_list = []
+            best_tuple = None
+            best_sharpe = -999
+
+            for P in range(0, 6):
+                for D in range(0, 2):
+                    for Q in range(0, 6):
+                        eq_df, _ = backtest_arima(df, (P, D, Q))
+                        s = compute_metrics(eq_df["Equity"])["Sharpe"]
+                        ari_list.append((P, D, Q, s))
+                        if s > best_sharpe:
+                            best_tuple, best_sharpe = (P, D, Q), s
+
+            gs_output["ari"] = (ari_list, best_tuple, best_sharpe)
+
+        st.session_state.gs_results = gs_output
+
+    # --------------------------------------------------------
+    # IF NO BACKTEST DATA YET
+    # --------------------------------------------------------
+    if st.session_state.results is None:
         st.info("Configure parameters then click Run.")
         return
 
     # --------------------------------------------------------
-    # Load data
+    # LOAD RESULTS
     # --------------------------------------------------------
-    try:
-        df = download_ticker(ticker, start_date)
-        df = df[~df.index.duplicated()].dropna()
-    except Exception as e:
-        st.error(f"Error downloading data: {e}")
-        return
-
-    if df.empty:
-        st.error("Downloaded data is empty.")
-        return
-
-    # --------------------------------------------------------
-    # Run Backtests
-    # --------------------------------------------------------
-    bh = backtest_buy_and_hold(df)
-    mom = backtest_momentum(df, momentum_lb)
-    ari, ari_future = backtest_arima(df, (p, d, q), forecast_horizon=30)
-
-    # Scale portfolios
-    bh["Equity"] *= initial_equity
-    mom["Equity"] *= initial_equity
-    ari["Equity"] *= initial_equity
+    df = st.session_state.results["df"]
+    bh = st.session_state.results["bh"]
+    mom = st.session_state.results["mom"]
+    ari = st.session_state.results["ari"]
+    ari_future = st.session_state.results["ari_future"]
+    momentum_lb = st.session_state.results["momentum_lb"]
+    p, d, q = st.session_state.results["order"]
+    initial_equity = st.session_state.results["initial_equity"]
+    view_range = st.session_state.results["view_range"]
 
     # --------------------------------------------------------
-    # Performance Metrics
+    # PERFORMANCE METRICS
     # --------------------------------------------------------
     st.subheader("📊 Performance Metrics")
 
@@ -133,30 +204,18 @@ def main():
         }
     ).T
 
-    st.dataframe(
-        metrics.style.format(
-            {
-                "Return": "{:.2%}",
-                "Vol": "{:.2%}",
-                "Sharpe": "{:.2f}",
-                "MaxDD": "{:.2%}",
-            }
-        ),
-        use_container_width=True,
-    )
+    st.dataframe(metrics.style.format({
+        "Return": "{:.2%}", "Vol": "{:.2%}",
+        "Sharpe": "{:.2f}", "MaxDD": "{:.2%}",
+    }), use_container_width=True)
 
     # --------------------------------------------------------
-    # View range filtering
+    # VIEW RANGE FILTER
     # --------------------------------------------------------
-    def filter_range(df_in: pd.DataFrame) -> pd.DataFrame:
+    def filter_range(df_in):
         if view_range == "MAX":
             return df_in
-
-        days = {
-            "1W": 7, "1M": 30, "3M": 90, "6M": 180,
-            "1Y": 365, "5Y": 365 * 5,
-        }[view_range]
-
+        days = {"1W":7,"1M":30,"3M":90,"6M":180,"1Y":365,"5Y":365*5}[view_range]
         return df_in.iloc[-days:]
 
     df_v = filter_range(df)
@@ -165,169 +224,78 @@ def main():
     ari_v = filter_range(ari)
 
     # --------------------------------------------------------
-    # Price chart
+    # PRICE CHART
     # --------------------------------------------------------
     st.subheader("📉 Price Chart")
 
     fig_price = go.Figure()
-    fig_price.add_trace(go.Scatter(
-        x=df_v.index,
-        y=df_v["Adj Close"],
-        name=f"{ticker} Price",
-        line=dict(color="#4c78ff", width=2),
-    ))
+    fig_price.add_trace(go.Scatter(x=df_v.index, y=df_v["Adj Close"], name=f"{ticker} Price"))
 
     if ari_future is not None:
         fig_price.add_trace(go.Scatter(
-            x=ari_future.index,
-            y=ari_future["ForecastPrice"],
-            name="ARIMA Forecast 30d",
-            mode="lines",
-            line=dict(color="orange", width=2, dash="dot"),
+            x=ari_future.index, y=ari_future["ForecastPrice"],
+            name="ARIMA Forecast", line=dict(dash="dot")
         ))
 
-    fig_price.update_layout(
-        template="plotly_dark",
-        height=400,
-        xaxis_title="Date",
-        yaxis_title="Price",
-    )
+    fig_price.update_layout(template="plotly_dark", height=400)
     st.plotly_chart(fig_price, use_container_width=True)
 
     # --------------------------------------------------------
-    # Portfolio Value Chart
+    # PORTFOLIO VALUE
     # --------------------------------------------------------
     st.subheader(f"💰 Portfolio Value (Initial = ${initial_equity:,})")
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=bh_v.index, y=bh_v["Equity"], name="Buy & Hold"))
-    fig.add_trace(go.Scatter(x=mom_v.index, y=mom_v["Equity"], name=f"Momentum L={momentum_lb}"))
-    fig.add_trace(go.Scatter(x=ari_v.index, y=ari_v["Equity"], name=f"ARIMA({p},{d},{q})"))
+    fig.add_trace(go.Scatter(x=mom_v.index, y=mom_v["Equity"], name="Momentum"))
+    fig.add_trace(go.Scatter(x=ari_v.index, y=ari_v["Equity"], name="ARIMA"))
 
-    fig.update_layout(
-        template="plotly_dark",
-        height=450,
-        xaxis_title="Date",
-        yaxis_title="Portfolio Value ($)",
-    )
+    fig.update_layout(template="plotly_dark", height=450)
     st.plotly_chart(fig, use_container_width=True)
 
     # --------------------------------------------------------
-    # NEW: DAILY RETURNS GRAPH
+    # HISTOGRAMS (NO REFRESH)
     # --------------------------------------------------------
-    st.subheader("📉 Daily Returns Comparison")
+    st.subheader("📊 Returns Distribution")
 
-    returns_df = pd.DataFrame({
-        "BH_Returns": bh["Equity"].pct_change(),
-        f"Momentum_Returns_L={momentum_lb}": mom["Equity"].pct_change(),
-        f"ARIMA_Returns_{p}_{d}_{q}": ari["Equity"].pct_change(),
+    show_bh = st.checkbox("Buy & Hold", True)
+    show_mom = st.checkbox("Momentum", True)
+    show_ari = st.checkbox("ARIMA", True)
+
+    ret = pd.DataFrame({
+        "BH": bh["Equity"].pct_change(),
+        "Momentum": mom["Equity"].pct_change(),
+        "ARIMA": ari["Equity"].pct_change(),
     }).dropna()
 
-    fig_ret = go.Figure()
+    fig_hist = go.Figure()
+    if show_bh: fig_hist.add_trace(go.Histogram(x=ret["BH"], name="BH", opacity=0.6))
+    if show_mom: fig_hist.add_trace(go.Histogram(x=ret["Momentum"], name="Momentum", opacity=0.6))
+    if show_ari: fig_hist.add_trace(go.Histogram(x=ret["ARIMA"], name="ARIMA", opacity=0.6))
 
-    for col in returns_df.columns:
-        fig_ret.add_trace(
-            go.Scatter(
-                x=returns_df.index,
-                y=returns_df[col],
-                name=col,
-                mode="lines",
-                line=dict(width=1)
-            )
-        )
-
-    fig_ret.update_layout(
-        template="plotly_dark",
-        height=350,
-        xaxis_title="Date",
-        yaxis_title="Daily Returns",
-    )
-
-    st.plotly_chart(fig_ret, use_container_width=True)
+    fig_hist.update_layout(template="plotly_dark", barmode="overlay", height=320)
+    st.plotly_chart(fig_hist, use_container_width=True)
 
     # --------------------------------------------------------
-    # Grid Search
+    # GRID SEARCH RESULTS (stored)
     # --------------------------------------------------------
-    st.subheader("🏆 Optimal Parameters Summary")
+    st.subheader("🏆 Grid Search Results")
 
-    best_L = None
-    best_L_sharpe = -999
-    best_arima = None
-    best_arima_sharpe = -999
+    if st.session_state.gs_results is not None:
 
-    # Momentum Grid Search
-    if gs_mom:
-        st.subheader("🔥 Momentum Grid Search")
-        results = []
+        # Momentum GS
+        if "mom" in st.session_state.gs_results:
+            mom_list, best_L, best_sharpe = st.session_state.gs_results["mom"]
+            df_mom = pd.DataFrame(mom_list, columns=["L", "Sharpe"])
+            st.write(f"⭐ Best Momentum L = {best_L} (Sharpe={best_sharpe:.3f})")
+            st.line_chart(df_mom.set_index("L"))
 
-        for L in range(2, 121):
-            eq = backtest_momentum(df, L)["Equity"]
-            sharpe = compute_metrics(eq)["Sharpe"]
-            results.append((L, sharpe))
-            if sharpe > best_L_sharpe:
-                best_L = L
-                best_L_sharpe = sharpe
-
-        st.line_chart(pd.DataFrame(results, columns=["L", "Sharpe"]).set_index("L"))
-
-    # ARIMA Grid Search
-    if gs_ari:
-        st.subheader("🔥 ARIMA Grid Search")
-        results = []
-
-        for P in range(0, 6):
-            for D in range(0, 2):
-                for Q in range(0, 6):
-                    eq_df, _ = backtest_arima(df, (P, D, Q))
-                    sharpe = compute_metrics(eq_df["Equity"])["Sharpe"]
-                    results.append((P, D, Q, sharpe))
-                    if sharpe > best_arima_sharpe:
-                        best_arima = (P, D, Q)
-                        best_arima_sharpe = sharpe
-
-        st.dataframe(
-            pd.DataFrame(results, columns=["p", "d", "q", "Sharpe"]).sort_values(
-                "Sharpe", ascending=False
-            ),
-            use_container_width=True,
-        )
-
-    # Summary Table
-    summary = []
-    if best_L is not None:
-        summary.append(["Momentum", f"L={best_L}", best_L_sharpe])
-    if best_arima is not None:
-        summary.append(["ARIMA", str(best_arima), best_arima_sharpe])
-
-    if summary:
-        st.dataframe(
-            pd.DataFrame(summary, columns=["Strategy", "Optimal Parameters", "Sharpe"]),
-            use_container_width=True,
-        )
-    else:
-        st.info("No optimal parameters found.")
-
-    # --------------------------------------------------------
-    # CSV Export
-    # --------------------------------------------------------
-    st.subheader("⬇ Download Results")
-
-    out = pd.DataFrame(
-        {
-            "Price": df["Adj Close"],
-            "BH": bh["Equity"],
-            "Momentum": mom["Equity"],
-            "ARIMA": ari["Equity"],
-        }
-    )
-
-    st.download_button(
-        "Download CSV",
-        out.to_csv().encode(),
-        file_name=f"{ticker}_portfolio_value.csv",
-        mime="text/csv",
-    )
-
+        # ARIMA GS
+        if "ari" in st.session_state.gs_results:
+            ari_list, best_tuple, best_sharpe = st.session_state.gs_results["ari"]
+            df_ari = pd.DataFrame(ari_list, columns=["p","d","q","Sharpe"])
+            st.write(f"⭐ Best ARIMA = {best_tuple} (Sharpe={best_sharpe:.3f})")
+            st.dataframe(df_ari.sort_values("Sharpe", ascending=False))
 
 if __name__ == "__main__":
     main()
