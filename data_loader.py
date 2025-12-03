@@ -1,7 +1,7 @@
 import pandas as pd
 from datetime import datetime
 
-from quant_a.download_data import download_ticker
+from download_data import download_ticker
 
 
 def download_prices(tickers, start=None, end=None):

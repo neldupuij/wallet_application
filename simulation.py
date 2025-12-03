@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from quant_B.metrics import daily_returns
+from metrics import daily_returns
 
 
 def simulate_portfolio(

@@ -1,6 +1,6 @@
 import pandas as pd
 
-from quant_B.metrics import (
+from metrics import (
     annualized_return,
     annualized_volatility,
     sharpe_ratio,

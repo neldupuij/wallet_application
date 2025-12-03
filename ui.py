@@ -12,10 +12,10 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 
-from quant_B.data_loader import download_prices
-from quant_B.weights import asset_metrics, equal_weight, normalize_weights
-from quant_B.simulation import simulate_portfolio
-from quant_B.reporting import portfolio_metrics, build_correlation_matrix
+from data_loader import download_prices
+from weights import asset_metrics, equal_weight, normalize_weights
+from simulation import simulate_portfolio
+from reporting import portfolio_metrics, build_correlation_matrix
 
 
 def portfolio_page():
