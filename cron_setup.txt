@@ -1,0 +1,26 @@
+# ==============================================================================
+# CONFIGURATION CRON JOB - Wallet Application
+# ==============================================================================
+# Objectif : Générer un rapport financier quotidien automatique à 20h00.
+# Fichier cible : daily_report.py
+# Fréquence : Tous les jours à 20:00 (8:00 PM)
+# ==============================================================================
+
+# --- PRÉ-REQUIS ---
+# 1. Le projet doit être cloné sur le serveur (VM Linux).
+# 2. Les dépendances Python doivent être installées.
+# 3. Le script daily_report.py doit avoir les droits d'exécution (chmod +x daily_report.py).
+
+# --- LIGNE CRONTAB A AJOUTER ---
+# Modifier '/home/user/wallet_application' par le chemin réel de votre projet.
+# Modifier '/home/user/wallet_application/.venv/bin/python' par le chemin de votre interpréteur Python.
+
+0 20 * * * cd /home/user/wallet_application && /home/user/wallet_application/.venv/bin/python daily_report.py >> cron_log.txt 2>&1
+
+# --- EXPLICATION DE LA COMMANDE ---
+# 0 20 * * * : Déclenchement à la 0ème minute de la 20ème heure (20h00), tous les jours.
+# cd ...          : On se déplace dans le dossier du projet pour que les imports et chemins relatifs (ex: 'reports/') fonctionnent.
+# &&              : Si le déplacement fonctionne, on exécute la commande suivante.
+# /path/to/python : On utilise le Python de l'environnement virtuel pour avoir accès aux bibliothèques (pandas, yfinance...).
+# daily_report.py : Le script à exécuter.
+# >> cron_log.txt : Redirige la sortie (print) et les erreurs vers un fichier log pour le débogage.
