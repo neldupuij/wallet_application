@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import streamlit as st
 
 # -------------------------------------------------------------------
@@ -21,6 +22,16 @@ from ui import portfolio_page as quant_b_app
 # -------------------------------------------------------------------
 def main():
     st.set_page_config(page_title="Wallet Application", layout="wide")
+
+    # --- AUTO-REFRESH LOGIC (Exigence CDC: Refresh every 5 min) ---
+    if 'last_refresh' not in st.session_state:
+        st.session_state.last_refresh = time.time()
+
+    # Si plus de 300 secondes (5 minutes) se sont écoulées
+    if time.time() - st.session_state.last_refresh > 300:
+        st.session_state.last_refresh = time.time()
+        st.rerun()
+    # --------------------------------------------------------------
 
     st.sidebar.title("🔀 Application Selector")
     choice = st.sidebar.radio(
