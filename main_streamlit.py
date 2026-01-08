@@ -78,8 +78,7 @@ def _ensure_series(x, name: str) -> pd.Series:
             x2 = x
 
         # Prefer price-like columns
-        preferred = ["Adj Close", "Close"]
-        for pref in preferred:
+        for pref in ["Adj Close", "Close"]:
             if pref in x2.columns and pd.api.types.is_numeric_dtype(x2[pref]):
                 s = x2[pref].dropna().astype(float)
                 s.name = name
@@ -153,6 +152,13 @@ def _market_clocks_block():
         col.metric(name, fmt(local))
 
 
+def _delta_label(pct: float) -> str:
+    """Arrow + label for Streamlit metric delta."""
+    if pd.isna(pct):
+        return ""
+    return f"{'▼' if pct < 0 else '▲'} {pct:+.2%}"
+
+
 # -------------------------------------------------------------------
 # Pages
 # -------------------------------------------------------------------
@@ -207,7 +213,7 @@ def render_home():
     st.markdown("---")
 
     # -------------------------
-    # Market Snapshot (Intraday) - NO CHARTS
+    # Market Snapshot (Intraday) - NO CHARTS + red down / green up
     # -------------------------
     st.subheader("📈 Market Snapshot (Intraday)")
     st.caption("Variation journalière (intraday 5m si dispo, sinon daily).")
@@ -222,7 +228,11 @@ def render_home():
         if pd.isna(pct):
             col.metric(sym, "N/A", "No data")
         else:
-            col.metric(sym, f"{pct:+.2%}", "Today")
+            # value = absolute % (no sign), delta = signed with arrow
+            value = f"{abs(pct):.2%}"
+            delta = _delta_label(pct)
+            # delta_color does exactly what you want: negative -> red (inverse) + down arrow in delta string
+            col.metric(sym, value=value, delta=delta, delta_color="inverse")
 
     if all(pd.isna(pct_map[s]) for s in symbols):
         st.info("No market data available. Install yfinance (pip install yfinance) and check internet access.")
